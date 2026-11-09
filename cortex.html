@@ -1,0 +1,946 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>UMAY Cortex</title>
+<!--
+  UMAY · MEMORY CORTEX — live memory-network wallpaper
+
+  URL parameters (?a=b&c=d):
+    src=/graph      JSON source. If omitted, memory_graph.json is tried; if missing, DEMO mode starts.
+    src=push        no fetching: the host calls window.cortexFeed(json) (Umay's HUD does, from umay_memory.db)
+                    and window.cortexPause(true|false) (a game or a fullscreen video: no frames drawn).
+    orb=1           Umay herself on the desktop (the owner's design, 2026-11-07): her ring is the cortex's outer
+                    ring, in her state's color, with drifting star dust inside, her name and state at the top and
+                    the clock at the bottom; the network fits in between. The host sets her state with
+                    window.cortexOrb({state, label, color, level}).
+    poll=2          refresh interval (seconds). Lower = firing shows up sooner.
+    demo=1          force demo mode
+    cx=0.5 cy=0.5   network centre on screen (0–1)
+    scale=1         network size
+    spin=1          slow rotation speed (0 = off)
+    hud=1           info panel (0 = hide)
+    hudpos=bl       bl | br | tl | tr
+    fps=30          frame cap (24–30 is plenty for a wallpaper)
+    ambient=0       1 = faint random sparks when idle (purely cosmetic, not real activity)
+
+  JSON schema:
+    {
+      "nodes":  [{ "id", "label", "branch": "user|self", "parent": id|null,
+                   "type": "root|category|fact|episode", "importance": 0–1,
+                   "accessed": epoch_ms, "created": epoch_ms, "status": "inbox|placed" }],
+      "edges":  [{ "source", "target", "kind": "related" }],     // cross-links outside the tree
+      "events": [{ "id", "type", "nodes": [ids], "ts": epoch_ms }],
+      "meta":   { "consolidated_at": epoch_ms, "state": "idle|thinking|consolidating|researching" }
+    }
+
+  Event types (each fires once, when first seen, and only within LIVE_MS of happening):
+    retrieve  Umay read these neurons for a reply, in the given ORDER: an amber signal (SELF's color) leaves SELF,
+              goes along the real connections through each one, leaves its path lit for a moment and names the
+              neuron it is reading.
+    traverse  signal hops through nodes in the given ORDER, travelling along the tree between them.
+              Every neuron it passes lights up and fades. Use for background reasoning chains.
+    activate  all given neurons spark at once (staggered). Use for candidate lookups / embedding hits.
+    link      a signal runs between the two given neurons: a new connection.
+    add       given neurons flash (a fact confirmed, a path or link noted).
+
+  status="inbox" → logged but not yet placed (waits on the outer ring).
+  When it becomes "placed" it blooms out of its parent neuron. A neuron that gets a new label or parent flashes,
+  and one that leaves the graph (corrected, merged, deleted) collapses in red where it stood.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#000;
+  --cyan:#29c6e6;
+  --line:rgba(41,198,230,.16);
+  --text:#d6eef5;
+  --muted:#5d7c87;
+  --green:#3ff0a8;
+  --amber:#f2b84b;
+  --panel:rgba(3,12,17,.8);
+}
+html,body{margin:0;height:100%;background:var(--bg);overflow:hidden}
+canvas{display:block;position:fixed;inset:0}
+.hud{position:fixed;width:300px;padding:16px 18px 14px;background:var(--panel);border:1px solid var(--line);
+  font-family:'Share Tech Mono',ui-monospace,Consolas,monospace;color:var(--text);font-size:11px;letter-spacing:.12em;
+  -webkit-user-select:none;user-select:none;pointer-events:none}
+.hud.bl{left:36px;bottom:36px}.hud.br{right:36px;bottom:36px}.hud.tl{left:36px;top:36px}.hud.tr{right:36px;top:36px}
+.hud i{position:absolute;width:10px;height:10px;border:0 solid var(--cyan)}
+.hud i:nth-child(1){left:-6px;top:-6px;border-left-width:1.5px;border-top-width:1.5px}
+.hud i:nth-child(2){right:-6px;top:-6px;border-right-width:1.5px;border-top-width:1.5px}
+.hud i:nth-child(3){left:-6px;bottom:-6px;border-left-width:1.5px;border-bottom-width:1.5px}
+.hud i:nth-child(4){right:-6px;bottom:-6px;border-right-width:1.5px;border-bottom-width:1.5px}
+.head{display:flex;justify-content:space-between;color:var(--cyan)}
+.head .st{color:var(--muted)}
+.big{font-family:'Rajdhani',sans-serif;font-size:40px;font-weight:500;letter-spacing:.02em;margin:10px 0 0;color:#e9f7fb;line-height:1.1}
+.big small{font-family:'Share Tech Mono',monospace;font-size:10px;color:var(--cyan);letter-spacing:.18em;margin-left:10px}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin:12px 0 10px}
+.grid div{color:var(--muted);font-size:9.5px}
+.grid b{display:block;color:var(--text);font-weight:400;font-size:13px;margin-top:4px;letter-spacing:.06em}
+.state{display:flex;gap:10px;align-items:baseline;margin-top:2px}
+.state #state{color:var(--muted);font-size:11px;flex:1;transition:color .4s}
+.state #state.on{color:var(--green);text-shadow:0 0 8px rgba(63,240,168,.6)}
+.rule{height:1px;background:var(--line);margin:10px 0}
+.k{color:var(--muted);font-size:9.5px}
+.path{color:var(--cyan);font-size:9.5px;margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fact{font-family:'Rajdhani',sans-serif;font-weight:500;font-size:15px;line-height:1.25;letter-spacing:.03em;color:var(--text);margin-top:3px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.foot{display:flex;justify-content:space-between;margin-top:12px;color:var(--muted);font-size:9.5px}
+.dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--green);margin-right:6px;vertical-align:1px;box-shadow:0 0 6px var(--green)}
+.dot.off{background:#e05555;box-shadow:0 0 6px #e05555}
+.dot.demo{background:var(--amber);box-shadow:0 0 6px var(--amber)}
+#tip{position:fixed;pointer-events:none;padding:8px 10px;background:var(--panel);border:1px solid var(--line);
+  font:11px 'Share Tech Mono',monospace;color:var(--text);letter-spacing:.06em;max-width:300px;display:none}
+#tip .p{color:var(--cyan);font-size:9.5px;margin-bottom:4px}
+@media (max-width:520px){.hud{width:auto;left:16px!important;right:16px!important}}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="hud bl" id="hud">
+  <i></i><i></i><i></i><i></i>
+  <div class="head"><span>08 // MEMORY CORTEX</span><span class="st"><span class="dot" id="dot"></span><span id="mode">—</span></span></div>
+  <div class="big"><span id="total">0</span><small>NEURONS</small></div>
+  <div class="grid">
+    <div>USER<b id="sU">0</b></div><div>SELF<b id="sS">—</b></div><div>LINKS<b id="sE">0</b></div><div>INBOX<b id="sI">0</b></div>
+  </div>
+  <div class="state"><span class="k">STATE</span><span id="state">IDLE</span><span id="active" class="k">0 FIRING</span></div>
+  <div class="rule"></div>
+  <div class="k">LAST BRANCHED</div>
+  <div class="path" id="lpath">—</div>
+  <div class="fact" id="lfact">—</div>
+  <div class="foot"><span id="cons">CONSOLIDATED —</span><span id="grow">+0 / 24H</span></div>
+</div>
+<div id="tip"></div>
+
+<script>
+(() => {
+'use strict';
+
+/* ---------- ayarlar ---------- */
+const Q = new URLSearchParams(location.search);
+const num = (k, d) => { const v = parseFloat(Q.get(k)); return Number.isFinite(v) ? v : d; };
+const CFG = {
+  src: Q.get('src') || 'memory_graph.json',
+  srcGiven: Q.has('src'),
+  poll: num('poll', 2) * 1000,
+  ambient: Q.get('ambient') === '1',
+  demo: Q.get('demo') === '1',
+  cx: num('cx', .5), cy: num('cy', .5), scale: num('scale', 1),
+  spin: num('spin', 1), fps: num('fps', 30),
+  hud: Q.get('hud') !== '0', hudpos: Q.get('hudpos') || 'bl',
+  orb: Q.get('orb') === '1'
+};
+// R: of min(W, H); NET: how far out the network may reach, of the ring; MAXZ: the closest zoom (px per unit):
+// a small memory is shown up close and the camera backs off slowly as it grows (the owner, 2026-11-08)
+// NET 0.74: every neuron stays inside the colored star dust (it starts at 0.8 of the ring): fitting 85% of
+// them let the rest run out under the ring, and their links seemed to go nowhere (the owner, 2026-11-08)
+const ORB = { R: 0.44, NET: 0.74, TITLE: 0.80, CLOCK: 0.66, MAXZ: 3.4 };
+const orbState = { label: 'STANDBY', color: [56, 214, 255], level: 0 };
+const stars = Array.from({ length: 240 }, () => ({
+  r: Math.sqrt(Math.random()) * 0.97, a: Math.random() * 6.2832, s: 0.6 + Math.random() * 1.1,
+  w: (Math.random() - 0.5) * 0.00012, ph: Math.random() * 6.2832, tw: 0.4 + Math.random() * 1.6
+}));
+
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+let W = 0, H = 0, DPR = 1;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 1.5);
+  W = innerWidth; H = innerHeight;
+  cv.width = W * DPR; cv.height = H * DPR;
+  cv.style.width = W + 'px'; cv.style.height = H + 'px';
+}
+addEventListener('resize', resize); resize();
+
+const hudEl = document.getElementById('hud');
+hudEl.className = 'hud ' + CFG.hudpos;
+if (!CFG.hud) hudEl.style.display = 'none';
+
+/* ---------- renkler ---------- */
+const COL = { user: [41, 198, 230], self: [242, 184, 75], leaf: [160, 192, 202], hot: [63, 240, 168], gone: [235, 92, 92] };
+const rgba = (c, a) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+function sprite(c) {
+  const s = document.createElement('canvas'); s.width = s.height = 64;
+  const g = s.getContext('2d'), gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  gr.addColorStop(0, rgba(c, .95)); gr.addColorStop(.22, rgba(c, .35)); gr.addColorStop(1, rgba(c, 0));
+  g.fillStyle = gr; g.fillRect(0, 0, 64, 64); return s;
+}
+const GLOW = { user: sprite(COL.user), self: sprite(COL.self), hot: sprite(COL.hot) };
+const HAS_LS = 'letterSpacing' in ctx;
+
+/* ---------- durum ---------- */
+const nodes = new Map();
+let sim = [], inbox = [], edges = [], extraEdges = [];
+let alpha = 1, userRoot = null, selfRoot = null, memNode = null, firstLoad = true;
+// orb mode, the owner's sketch (2026-11-08): SELF and USER side by side like two stars, PIN apart from the
+// middle, Memories on the bond between them, its conversations branching out to the facts they mention
+const PIN = 115;
+const pulses = [], ripples = [], callouts = [], traces = [], ghosts = [];
+// an event older than this isn't shown: the desktop was covered then, and a replay would look like she is doing it now
+const LIVE_MS = 15000;
+const TRACE_MS = 3500;   // how long the way she went stays lit
+const READ_TIME = 4500, READ_HOP = [40, 150];   // one read: about this long in all, ms per hop kept between these
+const seenEvents = new Set();
+const stats = { last: null, consolidated: null, state: null, live: false, demo: false, offline: false };
+
+const reheat = a => { alpha = Math.max(alpha, a); };
+function pathOf(n) {
+  const out = []; let p = n, g = 0;
+  while (p && g++ < 64) { out.unshift(p); p = p.parent ? nodes.get(p.parent) : null; }
+  return out;
+}
+
+/* ---------- data merge ---------- */
+function merge(data) {
+  const inc = data.nodes || [];
+  const ids = new Set(inc.map(d => d.id));
+  for (const [id, n] of [...nodes]) {
+    if (ids.has(id)) continue;
+    if (!firstLoad && n.status !== 'inbox') ghosts.push({ x: n.x, y: n.y, t: performance.now() });
+    nodes.delete(id);
+  }
+
+  let pending = inc.filter(d => !nodes.has(d.id)), guard = 0;
+  while (pending.length && guard++ < 64) {
+    const next = [];
+    for (const d of pending) {
+      if (d.parent && ids.has(d.parent) && !nodes.has(d.parent)) next.push(d); else create(d);
+    }
+    if (next.length === pending.length) { next.forEach(create); break; }
+    pending = next;
+  }
+  for (const d of inc) { const n = nodes.get(d.id); if (n) apply(n, d); }
+  extraEdges = data.edges || [];
+  if (data.meta && data.meta.consolidated_at) stats.consolidated = data.meta.consolidated_at;
+  stats.state = (data.meta && data.meta.state) || null;
+  rebuild();
+
+  for (const ev of (data.events || [])) {
+    if (seenEvents.has(ev.id)) continue;
+    seenEvents.add(ev.id);
+    if (!firstLoad && Date.now() - ev.ts < LIVE_MS) fire(ev);
+  }
+  if (firstLoad) {
+    firstLoad = false;
+    alpha = 1; for (let i = 0; i < 320; i++) tick();
+    let last = null;
+    for (const n of sim) if (n.created && (!last || n.created > last.created)) last = n;
+    stats.last = last;
+  }
+}
+function create(d) {
+  const now = performance.now(), p = d.parent && nodes.get(d.parent);
+  const n = { id: d.id, x: 0, y: 0, vx: 0, vy: 0, born: -1e12, deg: 0, q: 1, r: 1.5, depth: 0,
+              status: d.status || 'placed', flash: 0, heat: 0, read: 0 };
+  if (p) { const a = Math.random() * 6.2832, r = 4 + Math.random() * 6; n.x = p.x + Math.cos(a) * r; n.y = p.y + Math.sin(a) * r; }
+  else { n.x = (Math.random() - .5) * 80; n.y = (Math.random() - .5) * 80; }
+  nodes.set(d.id, n);
+  if (!firstLoad) { reheat(.35); if (n.status !== 'inbox') bloom(n, now); }
+}
+function bloom(n, now) { n.born = now; stats.last = n; ripples.push({ n, t: now }); }
+function apply(n, d) {
+  const wasInbox = n.status === 'inbox';
+  if (!firstLoad && n.label !== undefined && (n.label !== (d.label || d.id) || n.parent !== (d.parent || null))) n.flash = 1;
+  n.label = d.label || d.id;
+  n.branch = d.branch === 'self' ? 'self' : 'user';
+  n.parent = d.parent || null;
+  n.type = d.type || 'fact';
+  n.imp = +d.importance || 0;
+  n.acc = +d.accessed || 0;
+  n.created = +d.created || 0;
+  n.status = d.status || 'placed';
+  if (wasInbox && n.status !== 'inbox' && !firstLoad) { bloom(n, performance.now()); reheat(.4); }
+}
+function rebuild() {
+  sim = []; inbox = []; edges = []; userRoot = selfRoot = memNode = null;
+  for (const n of nodes.values()) {
+    n.deg = 0;
+    (n.status === 'inbox' ? inbox : sim).push(n);
+    if (n.type === 'root') { if (n.branch === 'self') selfRoot = n; else userRoot = n; }
+  }
+  for (const n of sim) { const pth = pathOf(n); n.depth = pth.length - 1; n.cat = pth[1] || null; }
+  for (const n of sim) {
+    const p = n.parent && nodes.get(n.parent);
+    if (p && p.status !== 'inbox') edges.push({ a: p, b: n, k: 'tree' });
+  }
+  for (const e of extraEdges) {
+    const a = nodes.get(e.source), b = nodes.get(e.target);
+    if (a && b && a !== b && a.status !== 'inbox' && b.status !== 'inbox') edges.push({ a, b, k: 'rel' });
+  }
+  if (CFG.orb) memNode = sim.find(n => n.id === 'u:memories' || (n.type === 'category' && n.label === 'Memories'
+                                   && n.parent === (userRoot && userRoot.id))) || null;
+  if (userRoot && selfRoot && memNode) {
+    edges.push({ a: memNode, b: selfRoot, k: 'bond' });                   // Memories <-> Self; Memories <-> User
+  } else if (userRoot && selfRoot) edges.push({ a: userRoot, b: selfRoot, k: 'bond' });  // is a tree edge already
+  for (const e of edges) { e.a.deg++; e.b.deg++; }
+  sim.forEach((n, i) => {
+    n.i = i;
+    n.q = 1 + Math.sqrt(n.deg) * .6;
+    n.hub = n.type === 'root' || n.type === 'category' || n.deg >= 6;
+    n.r = (n.type === 'root' ? 5.5 : Math.min(6, 1.1 + Math.sqrt(n.deg) * .5 + n.imp * 1.2)) * (CFG.orb ? 1.6 : 1);
+  });
+  for (const e of edges) {
+    if (e.k === 'tree') {
+      if (e.b.type === 'category') { e.len = CFG.orb ? 85 : 170; e.str = .15; }
+      else if (e.a.type === 'root') { e.len = CFG.orb ? 55 : 70; e.str = .3; }
+      else { e.len = 16 + Math.sqrt(e.a.deg) * 6.5; e.str = .5; }
+    } else if (e.k === 'rel') { e.len = 120; e.str = .006; }
+    else { e.len = CFG.orb ? 150 : 520; e.str = .03; }   // user <-> self: 520 kept the camera far out
+    e.bias = e.a.deg / (e.a.deg + e.b.deg);
+  }
+  inbox.sort((a, b) => (a.created || 0) - (b.created || 0));
+}
+
+/* ---------- fizik ---------- */
+const CELL = 48;
+function tick() {
+  const a = alpha;
+  for (const e of edges) {
+    const A = e.a, B = e.b;
+    let dx = B.x - A.x, dy = B.y - A.y;
+    const d = Math.sqrt(dx * dx + dy * dy) || .01;
+    const f = (d - e.len) / d * e.str * a;
+    dx *= f; dy *= f;
+    B.vx -= dx * e.bias; B.vy -= dy * e.bias;
+    A.vx += dx * (1 - e.bias); A.vy += dy * (1 - e.bias);
+  }
+  // short-range repulsion (grid)
+  const grid = new Map(), key = (gx, gy) => gx * 8192 + gy;
+  for (const n of sim) {
+    const k = key(Math.floor(n.x / CELL) + 4096, Math.floor(n.y / CELL) + 4096);
+    let c = grid.get(k); if (!c) grid.set(k, c = []); c.push(n);
+  }
+  const R2 = CELL * CELL, K = 11 * a;
+  for (const n of sim) {
+    const gx = Math.floor(n.x / CELL) + 4096, gy = Math.floor(n.y / CELL) + 4096;
+    for (let ox = -1; ox <= 1; ox++) for (let oy = -1; oy <= 1; oy++) {
+      const c = grid.get(key(gx + ox, gy + oy)); if (!c) continue;
+      for (const m of c) {
+        if (m.i <= n.i) continue;
+        let dx = n.x - m.x, dy = n.y - m.y, d2 = dx * dx + dy * dy;
+        if (d2 > R2) continue;
+        if (d2 < .01) { dx = Math.random() - .5; dy = Math.random() - .5; d2 = .5; }
+        const f = K * n.q * m.q / (d2 + 3);
+        n.vx += dx * f; n.vy += dy * f; m.vx -= dx * f; m.vy -= dy * f;
+      }
+    }
+  }
+  // long-range hub repulsion (keeps clusters apart)
+  const hubs = sim.filter(n => n.hub), HK = 110 * a;
+  for (let i = 0; i < hubs.length; i++) for (let j = i + 1; j < hubs.length; j++) {
+    const p = hubs[i], q = hubs[j];
+    const dx = p.x - q.x, dy = p.y - q.y, d2 = dx * dx + dy * dy;
+    const f = HK * p.q * q.q / (d2 + 400);
+    p.vx += dx * f; p.vy += dy * f; q.vx -= dx * f; q.vy -= dy * f;
+  }
+  for (const n of sim) {
+    if (CFG.orb && memNode && selfRoot && userRoot && (n === userRoot || n === selfRoot || n === memNode)) {
+      n.x = n === userRoot ? PIN : n === selfRoot ? -PIN : 0; n.y = n.vx = n.vy = 0; continue;
+    }
+    if (n === userRoot) { n.x = n.y = n.vx = n.vy = 0; continue; }
+    n.vx -= n.x * .0025 * a; n.vy -= n.y * .0025 * a;
+    n.vx *= .6; n.vy *= .6;
+    const v2 = n.vx * n.vx + n.vy * n.vy;
+    if (v2 > 400) { const s = 20 / Math.sqrt(v2); n.vx *= s; n.vy *= s; }
+    n.x += n.vx; n.y += n.vy;
+  }
+  alpha = Math.max(.04, alpha * .985);
+}
+
+/* ---------- olaylar ---------- */
+// route between two neurons along the tree: a → common ancestor → b
+function treePath(a, b) {
+  const pa = pathOf(a), pb = pathOf(b);
+  let i = 0; while (i < pa.length && i < pb.length && pa[i] === pb[i]) i++;
+  if (i === 0) return [a, b];                       // different roots: jump straight (user ↔ self)
+  return pa.slice(i - 1).reverse().concat(pb.slice(i));
+}
+// from Self to a neuron along what is drawn: the bond into Memories, then the tree
+function fromSelf(n) {
+  if (!selfRoot || n.branch === 'self') return selfRoot ? treePath(selfRoot, n) : pathOf(n);
+  const door = memNode || userRoot;
+  return door ? [selfRoot].concat(treePath(door, n)) : [selfRoot, n];
+}
+const sparks = [];                                   // delayed single-neuron flashes
+function fire(ev) {
+  const list = (ev.nodes || []).map(id => nodes.get(id)).filter(n => n && n.status !== 'inbox');
+  if (!list.length) return;
+  const t = performance.now();
+  if (ev.type === 'retrieve') {
+    let path = fromSelf(list[0]);
+    for (let k = 1; k < list.length; k++) path = path.concat(treePath(list[k - 1], list[k]).slice(1));
+    if (path.length === 1) path.push(path[0]);
+    const step = Math.max(READ_HOP[0], Math.min(READ_HOP[1], READ_TIME / path.length));
+    pulses.push({ path, t0: t, seg: -1, step, read: new Set(list), call: null });
+  } else if (ev.type === 'link') {
+    if (list.length > 1) pulses.push({ path: list.slice(0, 2), t0: t, seg: -1, step: 320 });
+  } else if (ev.type === 'traverse') {
+    let path = [list[0]];
+    for (let k = 1; k < list.length; k++) path = path.concat(treePath(list[k - 1], list[k]).slice(1));
+    if (path.length === 1) path.push(path[0]);
+    pulses.push({ path, t0: t, seg: -1, step: 170, recall: false });
+  } else if (ev.type === 'activate') {
+    list.forEach((n, k) => sparks.push({ n, at: t + k * 60 + Math.random() * 120 }));
+  } else list.forEach(n => { n.flash = 1; });
+  lastActivity = t;
+}
+let lastActivity = -1e9;
+
+/* ---------- Umay's ring (orb=1) ---------- */
+function drawOrb(ox, oy, R, now) {
+  const c = orbState.color, t = now / 1000, lv = Math.min(1, orbState.level || 0);
+  // star dust inside the ring: tiny, slow, twinkling (her inner effects, small so the memory shows through)
+  for (const st of stars) {
+    st.a += st.w * 16;
+    const a = st.a + rot * .3, r = st.r * R;
+    const tw = .25 + .75 * (.5 + .5 * Math.sin(t * st.tw + st.ph));
+    ctx.fillStyle = rgba(st.r > .8 ? c : [200, 225, 235], (.3 + .5 * tw) * (st.r > .8 ? .9 : .75));
+    ctx.fillRect(ox + Math.cos(a) * r - st.s / 2, oy + Math.sin(a) * r - st.s / 2, st.s, st.s);
+  }
+  // the ring in her state's color, a soft glow that breathes (with her voice while she speaks)
+  const breathe = .5 + .5 * Math.sin(t * 1.3);
+  const glow = ctx.createRadialGradient(ox, oy, R * .92, ox, oy, R * 1.08);
+  glow.addColorStop(0, rgba(c, 0)); glow.addColorStop(.5, rgba(c, .10 + .08 * breathe + .25 * lv)); glow.addColorStop(1, rgba(c, 0));
+  ctx.fillStyle = glow;
+  ctx.beginPath(); ctx.arc(ox, oy, R * 1.08, 0, 6.2832); ctx.arc(ox, oy, R * .92, 0, 6.2832, true); ctx.fill();
+  ctx.lineWidth = 2 + 3 * lv;
+  ctx.strokeStyle = rgba(c, .55 + .3 * lv);
+  ctx.beginPath(); ctx.arc(ox, oy, R, 0, 6.2832); ctx.stroke();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = rgba(c, .18);
+  ctx.beginPath(); ctx.arc(ox, oy, R * .965, 0, 6.2832); ctx.stroke();
+  ctx.lineWidth = 2.5;
+  ctx.strokeStyle = rgba(c, .8);
+  for (let k = 0; k < 3; k++) {                       // her turning arcs
+    const a = t * .35 + k * 2.0944;
+    ctx.beginPath(); ctx.arc(ox, oy, R * 1.03, a, a + .55); ctx.stroke();
+  }
+  // her name and state at the top, the clock at the bottom
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  if (HAS_LS) ctx.letterSpacing = '14px';
+  ctx.font = '500 34px Rajdhani, sans-serif'; ctx.fillStyle = 'rgba(230,247,255,.92)';
+  ctx.fillText('UMAY', ox + 7, oy - R * ORB.TITLE);
+  if (HAS_LS) ctx.letterSpacing = '4px';
+  ctx.font = '700 12px Rajdhani, sans-serif'; ctx.fillStyle = rgba(c, .95);
+  ctx.fillText(orbState.label, ox + 2, oy - R * ORB.TITLE + 22);
+  const d = new Date(), hm = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  const cy = oy + R * ORB.CLOCK;
+  if (HAS_LS) ctx.letterSpacing = '3px';
+  ctx.font = '400 64px Rajdhani, sans-serif'; ctx.fillStyle = 'rgba(230,247,255,.95)';
+  ctx.fillText(hm, ox, cy);
+  const w = ctx.measureText(hm).width;
+  if (HAS_LS) ctx.letterSpacing = '0px';
+  ctx.textAlign = 'left'; ctx.font = '14px "Share Tech Mono", monospace'; ctx.fillStyle = 'rgba(56,214,255,.95)';
+  ctx.fillText(String(d.getSeconds()).padStart(2, '0'), ox + w / 2 + 6, cy);
+  ctx.textAlign = 'center';
+  if (HAS_LS) ctx.letterSpacing = '6px';
+  ctx.font = '600 12px Rajdhani, sans-serif'; ctx.fillStyle = 'rgba(127,223,255,.9)';
+  ctx.fillText(d.toLocaleDateString('en-GB', { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' })
+                .replace(',', ' ·').toUpperCase(), ox + 3, cy + 26);
+  if (HAS_LS) ctx.letterSpacing = '0px';
+  // where the network's labels must not go
+  return [[ox - 120, oy - R * ORB.TITLE - 34, 240, 64], [ox - 200, cy - 58, 400, 92]];
+}
+window.cortexOrb = s => {
+  if (!s) return;
+  if (s.label) orbState.label = String(s.label);
+  if (s.color) { const h = String(s.color).replace('#', ''); orbState.color = [0, 2, 4].map(i => parseInt(h.substr(i, 2), 16) || 0); }
+  orbState.level = +s.level || 0;
+};
+
+/* ---------- render ---------- */
+const cam = { s: 1, R: 300 };
+let rot = 0, lastF = 0, view = null, firing = 0;
+
+let paused = false;
+function frame(now) {
+  if (paused) return;                                // cortexPause(false) starts the loop again
+  requestAnimationFrame(frame);
+  // a page hosted behind the desktop icons never got its resize event (Qt WebEngine, 2026-11-07)
+  if (innerWidth !== W || innerHeight !== H) resize();
+  if (now - lastF < 1000 / CFG.fps - 2) return;
+  const dt = Math.min(100, now - (lastF || now)); lastF = now;
+  tick();
+
+  const ds = sim.map(n => Math.hypot(n.x, n.y)).sort((a, b) => a - b);
+  // orb mode fits every neuron inside her star dust (ORB.NET); the camera backs off slowly as the memory grows
+  const R = Math.max(CFG.orb ? 40 : 80, ds.length ? ds[Math.floor((ds.length - 1) * (CFG.orb ? 1 : .985))] : 80);
+  cam.R += (R - cam.R) * .04;
+  // orb mode: her ring is fixed to the screen, the network is fitted inside it (title above, clock below)
+  const orbR = Math.min(W, H) * ORB.R * CFG.scale;
+  const ts = CFG.orb ? Math.min(ORB.MAXZ, orbR * ORB.NET / (cam.R + 12))
+                     : Math.min(W, H) * .46 * CFG.scale / (cam.R * 1.14 + 56);
+  cam.s += (ts - cam.s) * (CFG.orb && ts < cam.s ? .012 : .05);   // backs off slowly, comes closer quicker
+  const ringR = CFG.orb ? orbR * 0.66 / cam.s : cam.R * 1.14 + 26;  // the inbox ring (world units)
+  rot += CFG.spin * dt * .000012;
+
+  const s = cam.s, ox = W * CFG.cx, oy = H * CFG.cy, cr = Math.cos(rot), sr = Math.sin(rot);
+  view = { s, ox, oy, cr, sr };
+  const toS = (x, y) => [ox + (x * cr - y * sr) * s, oy + (x * sr + y * cr) * s];
+
+  // inbox ring
+  const step = Math.min(.05, 6.2832 / Math.max(inbox.length, 1));
+  inbox.forEach((n, i) => { const a = -1.5708 - rot * 2 + i * step; n.x = Math.cos(a) * ringR; n.y = Math.sin(a) * ringR; });
+
+  // cluster radius (for label placement)
+  for (const n of sim) if (n.type === 'category') { n.ext = 0; n.cnt = 0; }
+  for (const n of sim) if (n.cat && n.cat !== n && n.cat.type === 'category') {
+    n.cat.ext += Math.hypot(n.x - n.cat.x, n.y - n.cat.y); n.cat.cnt++;
+  }
+  for (const n of sim) if (n.type === 'category') n.ext = n.cnt ? n.ext / n.cnt * 1.5 : 0;
+
+  // heat
+  const nowMs = Date.now();
+  firing = 0;
+  for (const n of sim) {
+    let h = n.born > 0 ? Math.exp(-(now - n.born) / 240000) : 0;
+    if (n.acc) h = Math.max(h, Math.exp(-Math.max(0, nowMs - n.acc) / 900000));
+    n.flash *= .962;
+    n.read *= .975;
+    n.heat = Math.max(h, n.flash);
+    if (n.flash > .15 || n.read > .15) firing++;
+  }
+  if (CFG.ambient && sim.length && Math.random() < .06) {
+    const n = sim[Math.random() * sim.length | 0]; n.flash = Math.max(n.flash, .35);
+  }
+
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+
+  // decorative ring + ticks (screen space); in orb mode it is Umay's ring, at a fixed size
+  const Rs = CFG.orb ? orbR : ringR * s;
+  const taken = CFG.orb ? drawOrb(ox, oy, orbR, now) : [];   // label boxes drawn so far ([x, y, w, h])
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(41,198,230,.07)';
+  ctx.beginPath(); ctx.arc(ox, oy, Rs, 0, 6.2832); ctx.stroke();
+  ctx.fillStyle = 'rgba(160,192,202,.28)';
+  for (let k = 0; k < 220; k++) {
+    const a = k / 220 * 6.2832 + rot * .5, j = Math.sin(k * 12.9898) * 3;
+    ctx.fillRect(ox + Math.cos(a) * (Rs + 9 + j) - .6, oy + Math.sin(a) * (Rs + 9 + j) - .6, 1.2, 1.2);
+  }
+  ctx.strokeStyle = 'rgba(41,198,230,.35)';
+  ctx.beginPath();
+  for (let k = 0; k < 4; k++) {
+    const a = k * 1.5708;
+    ctx.moveTo(ox + Math.cos(a) * (Rs + 22), oy + Math.sin(a) * (Rs + 22));
+    ctx.lineTo(ox + Math.cos(a) * (Rs + 34), oy + Math.sin(a) * (Rs + 34));
+  }
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(41,198,230,.22)'; ctx.lineWidth = 1.5;
+  for (let k = 0; k < (CFG.orb ? 0 : 3); k++) {   // in orb mode her own arcs turn instead
+    const a = -rot * 3 + k * 2.0944;
+    ctx.beginPath(); ctx.arc(ox, oy, Rs + 28, a, a + .35); ctx.stroke();
+  }
+
+  // world space (orb mode: clipped to the inside of her ring)
+  ctx.save();
+  if (CFG.orb) { ctx.beginPath(); ctx.arc(ox, oy, orbR * .985, 0, 6.2832); ctx.clip(); }
+  ctx.setTransform(DPR * s * cr, DPR * s * sr, -DPR * s * sr, DPR * s * cr, DPR * ox, DPR * oy);
+  const px = 1 / s;
+
+  ctx.lineWidth = .7 * px;
+  ctx.beginPath();
+  for (const e of edges) if (e.k === 'tree') { ctx.moveTo(e.a.x, e.a.y); ctx.lineTo(e.b.x, e.b.y); }
+  ctx.strokeStyle = CFG.orb ? 'rgba(120,170,185,.24)' : 'rgba(120,170,185,.14)'; ctx.stroke();
+  ctx.beginPath();
+  for (const e of edges) if (e.k === 'rel') { ctx.moveTo(e.a.x, e.a.y); ctx.lineTo(e.b.x, e.b.y); }
+  ctx.strokeStyle = CFG.orb ? 'rgba(41,198,230,.07)' : 'rgba(41,198,230,.022)'; ctx.stroke();
+  for (const e of edges) if (e.k === 'bond') {
+    if (CFG.orb && memNode) {   // the neural bond: Self's amber into Memories, Memories' cyan into User
+      ctx.lineWidth = 1.6 * px;
+      for (const [a, b, ca, cb] of [[selfRoot, memNode, COL.self, COL.user], [memNode, userRoot, COL.user, COL.user]]) {
+        const g = ctx.createLinearGradient(a.x, a.y, b.x, b.y);
+        g.addColorStop(0, rgba(ca, .55)); g.addColorStop(1, rgba(cb, .55));
+        ctx.strokeStyle = g; ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+      }
+      ctx.lineWidth = .7 * px;
+      continue;
+    }
+    ctx.setLineDash([4 * px, 7 * px]); ctx.strokeStyle = 'rgba(242,184,75,.22)';
+    ctx.beginPath(); ctx.moveTo(e.a.x, e.a.y); ctx.lineTo(e.b.x, e.b.y); ctx.stroke(); ctx.setLineDash([]);
+  }
+  ctx.lineWidth = 1 * px;
+  for (const e of edges) {
+    const h = e.k === 'tree' ? Math.min(e.a.heat + .3, e.b.heat) : e.k === 'rel' ? Math.min(e.a.heat, e.b.heat) * .6 : 0;
+    if (h < .04) continue;
+    ctx.strokeStyle = rgba(COL.hot, .55 * h);
+    ctx.beginPath(); ctx.moveTo(e.a.x, e.a.y); ctx.lineTo(e.b.x, e.b.y); ctx.stroke();
+  }
+  // the way she just went
+  ctx.lineWidth = 1.6 * px;
+  for (let k = traces.length - 1; k >= 0; k--) {
+    const tr = traces[k], p = (now - tr.t) / TRACE_MS;
+    if (p >= 1) { traces.splice(k, 1); continue; }
+    ctx.strokeStyle = rgba(COL.self, .8 * (1 - p));
+    ctx.beginPath(); ctx.moveTo(tr.a.x, tr.a.y); ctx.lineTo(tr.b.x, tr.b.y); ctx.stroke();
+  }
+
+  // cold neurons (batched)
+  const rMin = (CFG.orb ? 2.2 : .9) * px;
+  for (const br of ['user', 'self']) {
+    ctx.beginPath();
+    for (const n of sim) {
+      if (n.branch !== br || n.hub || n.heat >= .04 || n.read >= .04) continue;
+      const r = Math.max(n.r, rMin);
+      ctx.moveTo(n.x + r, n.y); ctx.arc(n.x, n.y, r, 0, 6.2832);
+    }
+    ctx.fillStyle = br === 'user' ? 'rgba(170,200,210,.62)' : 'rgba(242,184,75,.6)';
+    ctx.fill();
+  }
+  // inbox
+  ctx.beginPath();
+  for (const n of inbox) { ctx.moveTo(n.x + 1.6 * px, n.y); ctx.arc(n.x, n.y, 1.6 * px, 0, 6.2832); }
+  ctx.fillStyle = 'rgba(242,184,75,.85)'; ctx.fill();
+
+  // parlamalar
+  ctx.globalCompositeOperation = 'lighter';
+  for (const n of sim) {
+    if (n.hub && !(n === selfRoot && n.deg <= 1)) {
+      const g = n.branch === 'self' ? GLOW.self : GLOW.user;
+      const sz = (n.r * 7 + 10 * px) * (1 + n.heat * .6);
+      ctx.globalAlpha = n.type === 'root' ? .9 : .55;
+      ctx.drawImage(g, n.x - sz / 2, n.y - sz / 2, sz, sz);
+    }
+    // amber while she is reading it, then back to the green of a recently used memory
+    const used = n.heat * (1 - n.read);
+    for (const [lv, g] of [[used, GLOW.hot], [n.read, GLOW.self]]) {
+      if (lv < .04) continue;
+      const sz = Math.max(n.r * 7, 15 * px) * (.6 + lv * 1.2);
+      ctx.globalAlpha = Math.min(1, lv * 1.1);
+      ctx.drawImage(g, n.x - sz / 2, n.y - sz / 2, sz, sz);
+    }
+  }
+  for (const pu of pulses) {
+    const path = pu.path;
+    for (let tr = 0; tr < 4; tr++) {                 // head + fading trail
+      const p = (now - pu.t0) / pu.step - tr * .09, i = Math.floor(p);
+      if (p < 0 || i >= path.length - 1) continue;
+      const A = path[i], B = path[i + 1], f = p - i;
+      const x = A.x + (B.x - A.x) * f, y = A.y + (B.y - A.y) * f, sz = (pu.read ? 20 : 14) * px * (1 - tr * .2);
+      ctx.globalAlpha = 1 - tr * .25; ctx.drawImage(pu.read ? GLOW.self : GLOW.hot, x - sz / 2, y - sz / 2, sz, sz);
+    }
+  }
+  ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+
+  // hub and hot-neuron cores
+  for (const n of sim) {
+    if (n.hub) {
+      if (n === selfRoot && n.deg <= 1) {
+        const b = .35 + .2 * Math.sin(now / 900);
+        ctx.strokeStyle = rgba(COL.self, b); ctx.lineWidth = 1.2 * px;
+        ctx.beginPath(); ctx.arc(n.x, n.y, 5 * px + 2, 0, 6.2832); ctx.stroke();
+        continue;
+      }
+      ctx.fillStyle = n.branch === 'self' ? '#ffe3a8' : (n.type === 'root' ? '#effcff' : '#cdeef6');
+      ctx.beginPath(); ctx.arc(n.x, n.y, Math.max(n.r * .75, 1.4 * px), 0, 6.2832); ctx.fill();
+      if (n.type === 'root') {
+        ctx.strokeStyle = 'rgba(41,198,230,.6)'; ctx.lineWidth = 1 * px;
+        ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 5 * px, 0, 6.2832); ctx.stroke();
+      }
+    } else if (n.heat >= .04 || n.read >= .04) {
+      const base = n.branch === 'self' ? COL.self : COL.leaf;
+      const hot = mix(base, COL.hot, Math.min(1, n.heat * 1.4));
+      ctx.fillStyle = rgba(mix(hot, COL.self, Math.min(1, n.read * 1.4)), .95);
+      ctx.beginPath(); ctx.arc(n.x, n.y, Math.max(n.r, rMin) * (1 + Math.max(n.heat, n.read) * .5), 0, 6.2832); ctx.fill();
+    }
+  }
+  // what she let go of collapses where it stood
+  ctx.lineWidth = 1.2 * px;
+  for (let k = ghosts.length - 1; k >= 0; k--) {
+    const g = ghosts[k], p = (now - g.t) / 1800;
+    if (p >= 1) { ghosts.splice(k, 1); continue; }
+    ctx.strokeStyle = rgba(COL.gone, (1 - p) * .8);
+    ctx.beginPath(); ctx.arc(g.x, g.y, (1 - p) * 16 * px, 0, 6.2832); ctx.stroke();
+  }
+  // birth ripples
+  ctx.lineWidth = 1 * px;
+  for (let k = ripples.length - 1; k >= 0; k--) {
+    const rp = ripples[k], p = (now - rp.t) / 2200;
+    if (p >= 1) { ripples.splice(k, 1); continue; }
+    ctx.strokeStyle = rgba(COL.hot, (1 - p) * .7);
+    ctx.beginPath(); ctx.arc(rp.n.x, rp.n.y, (3 + p * 30) * px, 0, 6.2832); ctx.stroke();
+  }
+
+  // sinyal ilerlemesi
+  for (let k = pulses.length - 1; k >= 0; k--) {
+    const pu = pulses[k], i = Math.floor((now - pu.t0) / pu.step);
+    while (pu.seg < Math.min(i, pu.path.length - 1)) {
+      pu.seg++;
+      const n = pu.path[pu.seg];
+      if (!pu.read) { n.flash = 1; continue; }
+      if (pu.seg && pu.path[pu.seg - 1] !== n) traces.push({ a: pu.path[pu.seg - 1], b: n, t: now });
+      n.read = Math.max(n.read, pu.read.has(n) ? 1 : .4);   // passing through it is less than reading it
+      if (pu.read.has(n)) {                                  // one label, moving with her: many at once read as chaos
+        if (pu.call) { pu.call.n = n; pu.call.t = now - 300; }
+        else callouts.push(pu.call = { n, t: now });
+      }
+    }
+    if (i >= pu.path.length - 1) {
+      if (!pu.read) pu.path[pu.path.length - 1].flash = 1;
+      pulses.splice(k, 1);
+    }
+  }
+  for (let k = sparks.length - 1; k >= 0; k--) {
+    if (now >= sparks[k].at) { sparks[k].n.flash = 1; sparks.splice(k, 1); }
+  }
+
+  ctx.restore();
+
+  // labels (screen space)
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  // a label goes only where none is yet (nor her name or the clock): overlapping labels read as chaos
+  const free = (cx, cy, w) => {
+    if (CFG.orb && Math.hypot(cx - ox, cy - oy) + w / 2 > orbR * .95) return false;  // not over or past her ring
+    const b = [cx - w / 2 - 4, cy - 13, w + 8, 18];
+    for (const t of taken) if (b[0] < t[0] + t[2] && t[0] < b[0] + b[2] && b[1] < t[1] + t[3] && t[1] < b[1] + b[3]) return false;
+    taken.push(b);
+    return true;
+  };
+  const labelled = sim.filter(n => n.type === 'root' || n.type === 'category')
+    .sort((a, b) => (b.type === 'root') - (a.type === 'root') || b.deg - a.deg);
+  for (const n of labelled) {
+    const [x, y] = toS(n.x, n.y);
+    if (n.type === 'root') {
+      const dormant = n === selfRoot && n.deg <= 1;
+      if (HAS_LS) ctx.letterSpacing = '6px';
+      ctx.font = '600 15px Rajdhani, sans-serif';
+      ctx.fillStyle = n.branch === 'self' ? rgba(COL.self, dormant ? .6 : .95) : 'rgba(120,220,245,.95)';
+      if (!free(x + 3, y - 20, ctx.measureText(n.label.toUpperCase()).width)) continue;
+      ctx.fillText(n.label.toUpperCase(), x + 3, y - 20);
+      if (dormant) {
+        if (HAS_LS) ctx.letterSpacing = '3px';
+        ctx.font = '9px "Share Tech Mono", monospace'; ctx.fillStyle = 'rgba(93,124,135,.9)';
+        ctx.fillText('DORMANT', x + 1.5, y + 24);
+      }
+    } else {
+      if (HAS_LS) ctx.letterSpacing = '2.5px';
+      ctx.font = '600 10.5px Rajdhani, sans-serif';
+      ctx.fillStyle = n.branch === 'self' ? 'rgba(242,184,75,.75)' : 'rgba(150,205,220,.72)';
+      // push label outside the cluster, away from centre
+      const vx = x - ox, vy = y - oy, vl = Math.hypot(vx, vy) || 1;
+      const off = Math.min((n.ext || 0) * s, CFG.orb ? 40 : 160) + 14;
+      const mid = n === memNode;  // it sits in the middle: its label goes under it, not on it
+      const lx = mid ? x : x + vx / vl * off + 1.25, ly = mid ? y + 30 : y + vy / vl * off + 4;
+      const label = n.label.toUpperCase();
+      if (!free(lx, ly, ctx.measureText(label).width)) continue;
+      ctx.fillText(label, lx, ly);
+    }
+  }
+  ctx.textAlign = 'left';
+  for (let k = callouts.length - 1; k >= 0; k--) {
+    const c = callouts[k], age = now - c.t;
+    if (age > 5200 || !nodes.has(c.n.id)) { callouts.splice(k, 1); continue; }
+    const al = age < 300 ? age / 300 : age > 4200 ? (5200 - age) / 1000 : 1;
+    const [x, y] = toS(c.n.x, c.n.y);
+    ctx.strokeStyle = rgba(COL.self, .5 * al); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x + 4, y - 4); ctx.lineTo(x + 22, y - 22); ctx.lineTo(x + 34, y - 22); ctx.stroke();
+    if (HAS_LS) ctx.letterSpacing = '2px';
+    ctx.font = '9px "Share Tech Mono", monospace'; ctx.fillStyle = rgba(COL.self, .9 * al);
+    ctx.fillText('READING', x + 38, y - 30);
+    if (HAS_LS) ctx.letterSpacing = '.5px';
+    ctx.font = '500 13px Rajdhani, sans-serif'; ctx.fillStyle = `rgba(214,238,245,${al})`;
+    ctx.fillText(c.n.label, x + 38, y - 17);
+  }
+  if (HAS_LS) ctx.letterSpacing = '0px';
+}
+requestAnimationFrame(frame);
+
+/* ---------- tooltip (mouse) ---------- */
+const tip = document.getElementById('tip');
+let tipT = 0;
+addEventListener('mousemove', ev => {
+  if (!view || performance.now() - tipT < 40) return; tipT = performance.now();
+  const { s, ox, oy, cr, sr } = view;
+  const x0 = (ev.clientX - ox) / s, y0 = (ev.clientY - oy) / s;
+  const wx = x0 * cr + y0 * sr, wy = -x0 * sr + y0 * cr;
+  let best = null, bd = (10 / s) ** 2;
+  for (const n of sim.concat(inbox)) { const d = (n.x - wx) ** 2 + (n.y - wy) ** 2; if (d < bd) { bd = d; best = n; } }
+  if (!best) { tip.style.display = 'none'; return; }
+  const path = pathOf(best).slice(0, -1).map(p => p.label.toUpperCase()).join(' › ');
+  tip.innerHTML = '';
+  const p = document.createElement('div'); p.className = 'p';
+  p.textContent = (best.status === 'inbox' ? 'INBOX · ' : '') + (path || best.branch.toUpperCase());
+  const l = document.createElement('div'); l.textContent = best.label;
+  tip.append(p, l);
+  tip.style.display = 'block';
+  tip.style.left = Math.min(ev.clientX + 14, W - 310) + 'px';
+  tip.style.top = (ev.clientY + 14) + 'px';
+});
+addEventListener('mouseleave', () => { tip.style.display = 'none'; });
+
+/* ---------- HUD ---------- */
+const $ = id => document.getElementById(id);
+const fmt = n => n.toLocaleString('en-US');
+const hhmm = ms => new Date(ms).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+function updateHud() {
+  let u = 0, sCount = 0, g24 = 0; const now = Date.now();
+  for (const n of nodes.values()) {
+    if (n.branch === 'self') sCount++; else u++;
+    if (n.created && now - n.created < 864e5) g24++;
+  }
+  $('total').textContent = fmt(nodes.size);
+  $('sU').textContent = fmt(u);
+  $('sS').textContent = sCount <= 1 ? 'DORMANT' : fmt(sCount);
+  $('sE').textContent = fmt(edges.length);
+  $('sI').textContent = fmt(inbox.length);
+  const L = stats.last && nodes.has(stats.last.id) ? stats.last : null;
+  $('lpath').textContent = L ? pathOf(L).slice(0, -1).map(p => p.label.toUpperCase()).join(' › ') : '—';
+  $('lfact').textContent = L ? L.label : '—';
+  $('cons').textContent = 'CONSOLIDATED ' + (stats.consolidated ? hhmm(stats.consolidated) : '—');
+  $('grow').textContent = '+' + fmt(g24) + ' / 24H';
+  const busy = pulses.length || sparks.length || performance.now() - lastActivity < 2500;
+  const st = (stats.state && stats.state !== 'idle') ? stats.state : busy ? 'thinking' : 'idle';
+  $('state').textContent = st.toUpperCase();
+  $('state').className = st === 'idle' ? '' : 'on';
+  $('active').textContent = fmt(firing) + ' FIRING';
+  const dot = $('dot');
+  dot.className = 'dot' + (stats.demo ? ' demo' : stats.offline ? ' off' : '');
+  $('mode').textContent = stats.demo ? 'DEMO' : stats.offline ? 'OFFLINE' : 'LIVE';
+}
+setInterval(updateHud, 250);
+
+/* ---------- data source ---------- */
+async function load() {
+  try {
+    const r = await fetch(CFG.src + (CFG.src.includes('?') ? '&' : '?') + 't=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) throw new Error(r.status);
+    const j = await r.json();
+    stats.live = true; stats.offline = false;
+    merge(j);
+  } catch (e) {
+    if (firstLoad && !CFG.srcGiven) { startDemo(); return; }
+    stats.offline = true;
+  }
+  setTimeout(load, CFG.poll);
+}
+
+/* ---------- demo ---------- */
+function startDemo() {
+  stats.demo = true;
+  const D = { nodes: [], edges: [], events: [], meta: { consolidated_at: Date.now() - 4 * 60000 } };
+  let uid = 0, eid = 0; const now = Date.now();
+  const add = (label, parent, type = 'fact', branch = 'user', extra = {}) => {
+    const id = 'n' + (uid++);
+    D.nodes.push({ id, label, parent, type, branch, importance: Math.random() * .5,
+                   created: now - Math.random() * 864e5 * 60, ...extra });
+    return id;
+  };
+  const U = add('User', null, 'root'); add('Self', null, 'root', 'self');
+  const T = {
+    'Location': { 'Springfield': { 'Downtown': ['Home address', 'Nearby café', 'Gym'], 'Campus': ['Library', 'Department building'] },
+                  'Hometown': ['Family home'], 'Travel': ['Istanbul', 'Izmir', 'Trip abroad plan'] },
+    'Education': { 'University': { 'Courses': ['Course', 'Lecture', 'Reading list'], 'Department': ['Timetable', 'Advisor'] },
+                   'Exams': ['Midterm dates', 'Finals week'] },
+    'Projects': { 'UMAY': { 'Memory network': ['Consolidation', 'Neuron schema'], 'Voice': ['Whisper', 'Piper', 'RVC'],
+                            'HUD': ['Widgets', 'Wallpaper'] }, 'Side project': ['Notes', 'Dataset'] },
+    'Interests': { 'AI': ['Local models', 'Agents'], 'Football': ['Team', 'Match days'],
+                   'Markets': ['FX', 'Crypto', 'Stocks'], 'Games': ['Steam library'] },
+    'Preferences': { 'Interface': ['Dark theme', 'Minimal HUD'], 'Communication': ['Short answers', 'Turkish'], 'Food': ['Coffee', 'Favourite dish'] },
+    'People': { 'Family': ['Mother', 'Father', 'Sibling'], 'Friends': ['Close friend', 'Study group'] },
+    'Routines': { 'Morning': ['Wake-up time'], 'Work': ['Late-night sessions'], 'Weekend': ['Rest'] },
+    'Hardware': { 'Laptop': ['CPU', 'GPU', 'RAM'], 'Storage': ['C: drive'] },
+    'Goals': { 'Short term': ['Assignment deadline'], 'Long term': ['Career plan'] }
+  };
+  const facts = [];
+  const build = (obj, parent, depth) => {
+    if (Array.isArray(obj)) { obj.forEach(l => facts.push(add(l, parent))); return; }
+    for (const k in obj) {
+      const id = add(k, parent, depth === 0 ? 'category' : 'fact');
+      if (depth > 0) facts.push(id);
+      build(obj[k], id, depth + 1);
+      if (depth === 0) {
+        const extraN = 25 + (Math.random() * 55 | 0);
+        for (let i = 0; i < extraN; i++) facts.push(add(`${k} · fact ${i + 1}`, id));
+      }
+    }
+  };
+  build(T, U, 0);
+  // small sub-clusters under mid-level nodes
+  for (const id of facts.slice()) if (Math.random() < .12) {
+    const lbl = D.nodes.find(n => n.id === id).label;
+    const m = 4 + (Math.random() * 14 | 0);
+    for (let i = 0; i < m; i++) facts.push(add(`${lbl} · detail ${i + 1}`, id));
+  }
+  // episodic memories + cross-links
+  const ep = add('Memories', U, 'category');
+  for (let i = 0; i < 150; i++) {
+    const d = new Date(now - i * 864e5 * .4);
+    const id = add('Conversation · ' + d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }), ep, 'episode');
+    const k = 1 + (Math.random() * 2 | 0);
+    for (let j = 0; j < k; j++) D.edges.push({ source: id, target: facts[Math.random() * facts.length | 0], kind: 'related' });
+  }
+  const pool = ['A favourite song', 'A new habit', 'A memory', 'A preference', 'A plan', 'A small detail', 'A new interest'];
+  const placed = () => D.nodes.filter(n => n.type !== 'root' && n.status !== 'inbox');
+  const pick = a => a[Math.random() * a.length | 0];
+  const emit = (type, ids) => {
+    D.events.push({ id: 'e' + (eid++), type, nodes: ids, ts: Date.now() });
+    if (D.events.length > 40) D.events.shift();
+  };
+  const inboxNew = () => {
+    const c = D.nodes.filter(n => n.branch === 'user' && (n.type === 'category' || n.type === 'fact') && n.status !== 'inbox' && n.label !== 'Memories');
+    const p = pick(c);
+    const label = pick(pool) + ' · ' + new Date().toLocaleTimeString('en-GB');
+    return add(label, p.id, 'fact', 'user', { status: 'inbox', created: Date.now(), importance: .3 });
+  };
+  for (let i = 0; i < 5; i++) inboxNew();
+  merge(D);
+
+  // consolidation: new fact arrives → candidate neurons spark → it branches out of its parent
+  setInterval(() => {
+    inboxNew(); merge(D);
+    setTimeout(() => {
+      const n = D.nodes.find(x => x.status === 'inbox'); if (!n) return;
+      D.meta.state = 'consolidating';
+      const sib = D.nodes.filter(x => x.parent === n.parent && x.status !== 'inbox').map(x => x.id);
+      const cands = [n.parent].concat(sib.sort(() => Math.random() - .5).slice(0, 7));
+      emit('activate', cands); merge(D);
+      setTimeout(() => {
+        n.status = 'placed'; n.created = Date.now(); D.meta.consolidated_at = Date.now();
+        D.meta.state = null; merge(D);
+      }, 1400);
+    }, 2500 + Math.random() * 2500);
+  }, 6000);
+
+  // background thinking: a chain of associations hopping between neurons
+  setInterval(() => {
+    const pl = placed(), chain = [pick(pl)];
+    const hops = 2 + (Math.random() * 4 | 0);
+    for (let h = 0; h < hops; h++) {
+      const cur = chain[chain.length - 1];
+      const links = D.edges.filter(e => e.source === cur.id || e.target === cur.id);
+      if (links.length && Math.random() < .5) {
+        const e = pick(links); chain.push(D.nodes.find(x => x.id === (e.source === cur.id ? e.target : e.source)));
+      } else chain.push(pick(pl));
+    }
+    emit('traverse', chain.map(n => n.id)); merge(D);
+  }, 4200);
+
+  // a reply: she goes through what she reads for it, in order
+  setInterval(() => {
+    const read = Array.from({ length: 2 + (Math.random() * 4 | 0) }, () => pick(D.nodes.filter(n => n.type === 'fact' && n.status !== 'inbox')));
+    read.forEach(t => { t.accessed = Date.now(); });
+    emit('retrieve', read.map(n => n.id)); merge(D);
+  }, 9000);
+}
+
+/* ---------- pushed by the host (src=push) ---------- */
+window.cortexFeed = data => {
+  try { stats.live = true; stats.offline = false; merge(typeof data === 'string' ? JSON.parse(data) : data); }
+  catch (e) { stats.offline = true; }
+};
+window.cortexPause = on => {
+  const was = paused; paused = !!on;
+  if (was && !paused) { lastF = 0; requestAnimationFrame(frame); }
+};
+
+if (CFG.demo) startDemo(); else if (CFG.src !== 'push') load();
+updateHud();
+})();
+</script>
+</body>
+</html>

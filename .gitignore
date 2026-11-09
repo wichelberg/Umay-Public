@@ -1,0 +1,90 @@
+# Secrets and personal data (examples are committed instead)
+.env
+.env.*
+!.env.example
+i18n.py
+config.json
+chat_logs/
+run_logs/
+calendar/
+assets/user.*
+assets/Umay_full.png
+whatsapp_uia_dump*.txt
+DevelopmentPlanLogs/
+# The owner's development plan (personal notes, Telegram answers)
+development/
+# Tests: their sample data holds the owner's own dates, plans and amounts
+tests/
+
+# Keys, tokens and credentials, wherever they land
+*.pem
+*.key
+*.pfx
+*.p12
+*.ppk
+*.kdbx
+credentials*.json
+*token*.json
+*secret*.json
+
+# Runtime state and logs (normally in %LOCALAPPDATA%\Umay; in case a copy lands here)
+*.log
+*.sqlite
+*.sqlite3
+*.db
+*.jsonl
+*.bak
+*.bak-*
+
+# Build output
+build/
+dist/
+*.spec
+*.exe
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*_env/
+
+# Model weights (downloaded or trained, never pushed)
+*.onnx
+*.pt
+*.pth
+*.safetensors
+*.ckpt
+
+# Per-machine editor and agent settings
+.vscode/
+.idea/
+.claude/settings.local.json
+.obsidian/workspace*.json
+.obsidian/cache
+
+# Umay's character (desktop pet): Blender model, reference photos, renders, sprites.
+# Kept out of the repo; the pushed version has no character.
+pet/
+assets/pet/
+# Read-aloud texts for train_stt.py / voice_recorder.py (they tell her story)
+voice_reading_tr.txt
+voice_sentences_tr.txt
+
+# Desktop pet on/off (per machine)
+pet.json
+pet_log*.txt
+
+# Owner voice recordings for train_stt.py (personal data)
+UserVoice/
+# Reference recordings for Umay's own voice (TTS / RVC); sounds/Umay holds more of them (unused by the code)
+UmayVoice/
+sounds/Umay/
+
+# Reference video (someone else's), not used by the code
+UI/
+*.mp4
+
+# Agent instructions and internal docs (kept local)
+CLAUDE.md
+docs/
