@@ -2513,6 +2513,9 @@ def start(folder, can_run, search=None, remaining=None, away=lambda: False, news
     away() -> the owner is AFK (full pass and research only then); news() -> who the newsfeed follows."""
     if _learner["it"] is not None or not enabled():
         return
+    # Nothing runs yet: a state the db still holds is from a process that ended mid-work. 2026-11-11 21:31 a restart
+    # cut a research short and the wallpaper said "researching" for hours (set_state's "idle" never came).
+    store().set_state("idle")
     learner = Learner(store(), folder, ask=ask, search=search, remaining=remaining, away=away, news=news)
     _learner["it"] = learner
 
