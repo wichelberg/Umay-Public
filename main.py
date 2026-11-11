@@ -32,16 +32,19 @@ import hud_feeds
 import i18n
 import local_llm
 import memory_cortex
+import npu
 import pc_tools
 import price_alerts
 import router
 import system_tools
 import telegram_listener
+import tool_pick
 import voice
 import voice_guard
 import voice_session
 import wake
 import web_control
+import windows_watch
 
 RELOAD_INTERVAL_SECONDS = 1 * 60
 INSTANCE_MUTEX = "Local\\Umay.instance"
@@ -154,10 +157,22 @@ def _price_alarm(text, level="important"):
         pc_tools.fallback_notify(text)
 
 
+def _news_gate(headline):
+    """How likely the NPU's decision model says a headline is worth interrupting the owner for (companion.NEWS_ASK,
+    companion._ranked). Raises when the NPU doesn't answer. A long wait: memory work on the NPU's chat server holds
+    the NPU for up to a minute (2026-11-11: a 60 s timeout ran out)."""
+    answer = npu.decide(headline, {"worth": {"type": "noul", "instructions": companion.NEWS_ASK}},
+                        timeout=180).get("worth") or {}
+    if not isinstance(answer.get("noul"), (int, float)):
+        raise ValueError(f"no answer: {answer}")
+    return answer["noul"]
+
+
 def _start_companion():
     """Umay on her own initiative (companion.py): what she needs from the rest of her."""
     companion.start({
         "ask": lambda prompt: ai_assistant.ask_flash(prompt, what="companion", source="companion"),
+        "interrupt": _news_gate if npu.on() else None,
         "persona": ai_assistant.persona,
         "speak": voice_session.open_with,
         "write": ai_assistant.reach_out,
@@ -216,15 +231,27 @@ def main():
     web_control.watch(notify=_extension_problem, lang=ai_assistant.current_language)
     disk_watch.configure(ask=ai_assistant.ask_flash, notify=_disk_findings, lang=ai_assistant.current_language)
     disk_watch.start()
+    # What Windows undoes of the owner's trimming (an update turning hibernation or Recall back on, a program
+    # starting with Windows again): told once, aloud at the PC or on Telegram when away.
+    windows_watch.start(lambda text: companion.tell(text, "important", "windows") or pc_tools.fallback_notify(text)
+                        or True)
     # Judges finished conversations and keeps chat_logs under its limit, with the local model: not during a
-    # game, nor while it is answering.
+    # game, and only once she rests (local_llm.quiet: no reply for 5 minutes), not right after a talk.
     conversation_memory.start(ai_assistant.CHAT_LOG_DIR,
-                              can_run=lambda: not voice.gaming["on"] and not local_llm.answering())
+                              can_run=lambda: not voice.gaming["on"] and local_llm.quiet())
+    # The NPU's models (npu.py: the decision model the memory asks its yes/no questions). Not there, or it fails
+    # to start: everything goes to the local model as before.
+    def npu_up():
+        npu.stop_chat()  # a chat model's server an earlier Umay left behind holds 5.5 GB of RAM for nobody
+        if npu.start() and local_llm.picks():  # the decision model names the tools: their vectors, ahead (17 s)
+            tool_pick.warm(ai_assistant.TOOLS)
+    threading.Thread(target=npu_up, name="npu", daemon=True).start()
     # The Memory Cortex reads each finished conversation once; while the owner is away (AFK, companion's
     # UMAY_AWAY_MINUTES) it reads all the logs again and SELF researches (a small Tavily budget, topics from the
-    # memory and the newsfeed's follows). Never while she listens, answers or talks, nor during a game.
+    # memory and the newsfeed's follows). Never while she listens, answers or talks, nor during a game, and only
+    # once she rests (local_llm.quiet).
     memory_cortex.start(ai_assistant.CHAT_LOG_DIR,
-                        can_run=lambda: not voice.gaming["on"] and not local_llm.answering()
+                        can_run=lambda: not voice.gaming["on"] and local_llm.quiet()
                         and not voice_session.active() and not calls.active(),
                         search=lambda q: ai_assistant.tavily_search(q, max_results=3),
                         remaining=ai_assistant._tavily_remaining,

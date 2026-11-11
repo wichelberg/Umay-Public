@@ -24,6 +24,7 @@ from pathlib import Path
 import requests
 
 import local_llm
+import npu
 import paths
 
 CHECK_SECONDS = 5 * 60
@@ -223,7 +224,23 @@ class Memory:
 # --- the local model and the background loop ------------------------------------------------------------
 
 def ask_local(prompt):
-    """One question to the local model (Ollama), no tools; counts as Umay's own GPU work meanwhile."""
+    """One question to the local model (Ollama), no tools; counts as Umay's own GPU work meanwhile. The NPU's
+    chat model answers instead when one is set and up (UMAY_NPU_CHAT, like memory_cortex.ask_json): judging and
+    summing up a conversation is reading work, not the talking model's. Before both: the memory's own model on the GPU
+    when one is set (local_llm.memory_model)."""
+    model = local_llm.memory_model()
+    if model:
+        with local_llm.working(background=True):
+            r = requests.post(local_llm.CHAT_URL, json={
+                "model": model, "reasoning_effort": "none", "stream": False,
+                "messages": [{"role": "user", "content": prompt}]}, timeout=300)
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"] or ""
+    if npu.chat_ready():
+        try:
+            return npu.chat([{"role": "user", "content": prompt}], timeout=300)["choices"][0]["message"].get("content") or ""
+        except (requests.RequestException, KeyError, IndexError, ValueError):
+            pass  # the local model answers
     local_llm.ensure_model()
     with local_llm.working(background=True):  # memory work: it doesn't hold up its own next check
         r = requests.post(local_llm.CHAT_URL, json={

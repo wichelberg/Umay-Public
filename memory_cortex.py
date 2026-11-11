@@ -51,6 +51,7 @@ import requests
 
 import cortex_graph
 import local_llm
+import npu
 import paths
 
 EMBED_MODEL_DEFAULT = "qwen3-embedding:0.6b"
@@ -637,7 +638,32 @@ def embed_one(text, timeout=30):
 
 
 def ask_json(prompt, schema, timeout=300):
-    """One question to the local model with a JSON schema (Ollama structured output): the 4b can't break it."""
+    """One question that needs text, answered as JSON under `schema`. The NPU's chat model answers it when one is
+    set (UMAY_NPU_CHAT=qwen3.5:4b; the owner's choice, 2026-11-11): the model on the GPU may then be a roleplay
+    model, and those read facts out of a conversation badly (L3-8B-Stheno 65% of the extraction checks, Qwen3.5:4b
+    87%). So when that model only talks (local_llm.picks) and the NPU doesn't answer, this raises and the learner
+    tries again later: a late fact is better than a wrong one. Otherwise the local model answers (Ollama
+    structured output: the 4b can't break it). Before both: the memory's own model on the GPU when one is set
+    (local_llm.memory_model, the owner's plan 2026-11-11: it takes the VRAM while she rests, nothing of the RAM);
+    failing, this raises too and the learner tries again later."""
+    memory = local_llm.memory_model()
+    if memory:
+        with local_llm.working(background=True):
+            r = requests.post(f"{local_llm.BASE_URL}/api/chat", json={
+                "model": memory, "stream": False, "think": False, "format": schema, "options": {"temperature": 0},
+                "messages": [{"role": "user", "content": prompt}]}, timeout=timeout)
+        r.raise_for_status()
+        return json.loads(r.json()["message"]["content"] or "{}")
+    if npu.chat_model():
+        try:
+            if npu.ready():
+                return npu.ask_json(prompt, schema, timeout=timeout)
+            problem = "the server doesn't answer"
+        except (requests.RequestException, ValueError) as e:
+            problem = f"{type(e).__name__}: {str(e)[:120]}"
+        if local_llm.picks():
+            raise RuntimeError(f"no model for the memory's text work: npu: {problem}")
+        _log(f"npu chat: {problem}; the local model answers")
     local_llm.ensure_model()
     with local_llm.working(background=True):
         r = requests.post(f"{local_llm.BASE_URL}/api/chat", json={
@@ -645,6 +671,18 @@ def ask_json(prompt, schema, timeout=300):
             "options": {"temperature": 0}, "messages": [{"role": "user", "content": prompt}]}, timeout=timeout)
     r.raise_for_status()
     return json.loads(r.json()["message"]["content"] or "{}")
+
+
+def ask(prompt, schema, timeout=300):
+    """The learner's question: a yes/no or which-of-these goes to the decision model on the NPU when it is up
+    (npu.py: on relation and "is it the wrong fact" it beat the 4b by 23 and 58 points, 2026-11-10), everything
+    that needs text, and every question the NPU fails on, to the local model as before (ask_json)."""
+    if npu.choice_only(schema) and npu.ready():
+        try:
+            return npu.ask_choice(prompt, schema, timeout=min(timeout, 60))
+        except (requests.RequestException, ValueError) as e:
+            _log(f"npu: {type(e).__name__}: {str(e)[:120]}; the local model answers")
+    return ask_json(prompt, schema, timeout)
 
 
 # --- prompts -----------------------------------------------------------------------------------------------
@@ -1119,6 +1157,12 @@ class Learner:
         name = (name or "").strip().strip("\"'")[:80]
         seen = (seen or "").strip()[:120]
         if not name or len(name) < 2 or JUNK_ENTITY.search(name) or name.lower() in APP_NAMES or not _folder_key(name):
+            return None
+        # The owner is not someone they follow: "Alex" (how Umay addressed them) was filed under Interests with
+        # "Has a friend named Alex" beneath it, and replies said "you work with Alex" (2026-11-09).
+        words = set(_fold(name).split())
+        if words and words <= _own_names(self.store.nodes("parent='u:identity' AND type='fact'")):
+            _log(f"{source}: dropped entity {name!r} (the owner's own name)")
             return None
         on_disk = self._on_disk(name)
         kind = (kind or "").strip().lower()
@@ -1641,6 +1685,9 @@ def with_days(text, today=None):
 # Now: Identity always; the rest only for a neuron the message names (an entity, a group, a category word),
 # followed down its branch and its links; a name that is only close gets "did you mean" (speech mishears names:
 # "KZO" for Keizo, "case of" for SomeStreamer). No episodes. Nothing named: Identity alone.
+# 2026-11-10, from the logs since the last deploy and the real 4b (32 real exchanges x 5): of Identity only the name
+# goes with every message, a category word counts only in a message about the owner, the word search goes by word
+# stem, and the note carries a rule only for what is in it. See context_for and docs/pitfalls.md.
 NAME_SURE = 0.9         # a name this close (sound-alike letters, _sound) is the neuron itself
 NAME_MAYBE = 0.8        # this close: "did you mean". Measured on every owner line of chat_logs (2026-11-08): from
 #                         0.80 up all right ("Anna Smith" 0.82, "Sem and Creator" 0.85); below, mostly
@@ -1665,36 +1712,77 @@ SCAN_STOP = {"will", "goin", "back", "name", "time", "coul", "woul", "shou", "to
              "have", "with", "from", "them", "they", "when", "date", "wher", "whic", "than", "same", "only", "just",
              "good", "nice", "sure", "yeah", "okay", "plea", "sorr", "abou", "does", "doin", "dont", "didn", "actu",
              "real", "mean", "said", "says", "talk", "mate", "love", "dear", "here", "ther", "open", "clos", "play",
-             "stop", "star", "turn", "move", "show", "list", "find", "sear", "save", "memo", "remi", "misi", "misi",
+             "stop", "star", "turn", "move", "show", "list", "find", "sear", "save", "memo", "remi", "misi", "wait",
              "lutf", "bana", "beni", "sana", "nedi", "hang", "zama", "tari", "kapa", "acar",
              # what commands to a PC always say
              "docu", "fold", "file", "desk", "scre", "vide", "yout", "tabs", "brow", "oper", "mous", "clic", "wind",
              "apps", "appl", "code", "shor", "chan", "moni", "clou", "send"} | {w[:4] for w in CLAIM_VERBS}
-CATEGORY_WORDS = {      # a word (its start) that asks about a whole branch
-    "u:location": ("live", "living", "home", "city", "address", "hometown", "yaşı", "otur", "adres", "şehir"),
-    "u:people": ("family", "mother", "mom", "father", "dad", "sister", "brother", "friend", "girlfriend",
-                 "boyfriend", "wife", "husband", "aile", "anne", "baba", "kardeş", "abla", "arkadaş"),
+# A word that asks about a whole branch. Until 2026-11-10 any word starting like one counted, whoever it was about:
+# "How does this work?" (about a news story) brought ten lines of the owner's work and the 4b recited them, "for the
+# moment" was "mom", "çarşıya" was "cars", "favoring" was "favori" (the logs of 2026-11-09). Now the whole word
+# (with an English ending, CATEGORY_ENDING), and for the fixed branches the message has to speak of the owner
+# (ABOUT_ME): they hold what is theirs. "work" alone is a verb more often than their job ("is it working", "work on
+# it"): WORK_ASKED.
+CATEGORY_WORDS = {
+    "u:identity": ("who am i", "about me", "about myself", "my name", "my full name", "my age", "how old",
+                   "my birthday", "born", "nationality"),
+    "u:location": ("live", "living", "home", "city", "address", "hometown"),
+    "u:people": ("family", "mother", "mom", "mum", "father", "dad", "sister", "brother", "friend", "girlfriend",
+                 "boyfriend", "wife", "husband"),
     "u:education": ("school", "university", "degree", "professor", "lecture", "course", "dissertation", "thesis",
-                    "master", "bachelor", "study", "studies", "student", "graduat", "okul", "üniversite", "hoca",
-                    "ders", "tez", "yüksek lisans", "lisans", "mezun"),
-    "u:work": ("work", "job", "office", "company", "colleague", "işyer", "şirket"),
-    "u:projects": ("project", "proje"),
+                    "master", "bachelor", "study", "studies", "studying", "student", "graduate", "graduated",
+                    "graduating", "graduation"),
+    "u:work": ("job", "office", "company", "colleague", "workplace"),
+    "u:projects": ("project",),
     # "influences": how speech-to-text wrote it ("name me the influences that I like", 2026-11-09)
-    INFLUENCERS: ("influencer", "influences", "fenomen", "youtuber", "streamer", "creator", "yayıncı", "içerik üretici"),
-    "u:hobbies": ("hobby", "hobbies", "hobi"),
-    "u:hobbies:games": ("games", "oyunlar"),
-    "u:hobbies:sports": ("sport", "football", "futbol", "spor"),
-    "u:hobbies:cars": ("cars", "my car ", "araba"),
-    "u:hobbies:food": ("food", "dish", "restaurant", "yemek", "restoran"),
-    "u:companies": ("companies", "stocks", "şirketler", "hisse", "borsa"),
-    "u:world": ("politics", "world news", "siyaset", "gündem"),
-    "u:interests": ("favorite", "favourite", "favori"),
-    "u:preferences": ("prefer", "browser", "tercih"),
-    "u:routines": ("routine", "usually", "wake up", "rutin"),
-    "u:plans": ("plan", "trip", "flight", "travel", "meeting", "appointment", "seyahat", "uçuş", "toplantı"),
-    "u:health": ("health", "doctor", "sick", "medicine", "allergy", "sağlık", "doktor", "ilaç"),
-    "u:things": ("my phone", "my laptop", "my pc", "my computer", "telefonum"),
+    INFLUENCERS: ("influencer", "influences", "youtuber", "streamer", "creator"),
+    "u:hobbies": ("hobby", "hobbies"),
+    "u:hobbies:games": ("games",),
+    "u:hobbies:sports": ("sport", "football"),
+    "u:hobbies:cars": ("cars", "my car"),
+    "u:hobbies:food": ("food", "dish", "dishes", "restaurant"),
+    "u:companies": ("companies", "stocks"),
+    "u:world": ("politics", "world news"),
+    "u:interests": ("favorite", "favourite"),
+    "u:preferences": ("prefer", "browser"),
+    "u:routines": ("routine", "usually", "wake up"),
+    "u:plans": ("plan", "trip", "flight", "travel", "meeting", "appointment"),
+    "u:health": ("health", "doctor", "sick", "medicine", "allergy", "allergies"),
+    "u:things": ("my phone", "my laptop", "my pc", "my computer"),
 }
+CATEGORY_STARTS = {     # Turkish: the start of a word, whose endings say whose it is ("annem", "projelerim")
+    "u:identity": ("kimim", "adım ne", "ismim", "yaşım", "kaç yaşında", "doğum"),
+    "u:location": ("yaşıyo", "yaşadığ", "otur", "adres", "şehir"),
+    "u:people": ("aile", "anne", "baba", "kardeş", "abla", "arkadaş"),
+    "u:education": ("okul", "üniversite", "hoca", "ders", "tez", "yüksek lisans", "lisans", "mezun"),
+    "u:work": ("işyer", "şirket"),
+    "u:projects": ("proje",),
+    INFLUENCERS: ("fenomen", "yayıncı", "içerik üretici"),
+    "u:hobbies": ("hobi",),
+    "u:hobbies:games": ("oyunlar",),
+    "u:hobbies:sports": ("futbol", "spor"),
+    "u:hobbies:cars": ("araba",),
+    "u:hobbies:food": ("yemek", "restoran"),
+    "u:companies": ("şirketler", "hisse", "borsa"),
+    "u:world": ("siyaset", "gündem"),
+    "u:interests": ("favorim", "favorile", "favorisi", "en favori"),   # not "favori": "favoring" starts so
+    "u:preferences": ("tercih",),
+    "u:routines": ("rutin",),
+    "u:plans": ("seyahat", "uçuş", "toplantı"),
+    "u:health": ("sağlık", "doktor", "ilaç"),
+    "u:things": ("telefonum",),
+}
+CATEGORY_ENDING = r"(?:s|es|'s|’s|ed|d|ing)?"
+ABOUT_ME = re.compile(r"\b(?:i|i'm|im|i've|i'd|i'll|my|mine|myself|we|our|ours|about\s+me)\b", re.IGNORECASE)
+WORK_ASKED = re.compile(r"\b(?:(?:my|at|for|from|of|about)\s+work\b(?!\s+(?:on|with|in|out)\b)|"
+                        r"work[\s-]+(?:projects?|related|stuff|things?|matters?|folders?|tasks?|plans?)\b)", re.IGNORECASE)
+# The owner's own name is theirs, not someone to look up: saying it brought "did you mean" their mother, who shares
+# the surname, and the 4b answered "I'm not your mother" (2026-11-09). A fact that says the name:
+NAME_FACT = re.compile(r"\bnames?\b|\bcalled\b|\bnickname", re.IGNORECASE)   # not "Has father named ..."
+OWN_WORK = {"u:projects", "u:work"}  # the owner's projects are in both: one named in either says enough for both
+PLAIN_WORDS = {"work", "project", "projects", "documents", "desktop", "downloads", "apps", "applications", "home",
+               "school", "family", "plan", "plans"}  # an entity called so (or by one lower-case word) is no name
+SCAN_WORDS_MOST = 40    # a longer message is a text handed over (to translate, to sum up): its words search nothing
 NAME_STOP = {"the", "a", "an", "and", "or", "of", "to", "in", "on", "at", "for", "with", "my", "me", "you", "your",
              "is", "are", "it", "its", "this", "that", "please", "could", "can", "would", "open", "play", "video",
              "videos", "channel", "latest", "new", "newest", "last", "youtube", "search", "find", "show", "tell",
@@ -1788,10 +1876,32 @@ def name_matches(text, names, exact=frozenset()):
 
 
 def _category_hits(text):
-    low = " " + _fold(VOCATIVE.sub(" ", text)) + " "
-    raw = " " + (text or "").lower() + " "
-    return [cid for cid, words in CATEGORY_WORDS.items()
-            if any(re.search(rf"\b{re.escape(_fold(w))}", low) or re.search(rf"\b{re.escape(w)}", raw) for w in words)]
+    """The branches the message asks about as a whole: an English word of CATEGORY_WORDS (the whole word) in a
+    message that speaks of the owner (ABOUT_ME), or a Turkish word start of CATEGORY_STARTS."""
+    text = VOCATIVE.sub(" ", text or "")
+    low = " " + _fold(text) + " "
+    raw = " " + text.lower().replace("’", "'") + " "
+    mine = bool(ABOUT_ME.search(raw))
+    out = []
+    for cid in CATEGORY_WORDS:
+        english = [_fold(w) for w in CATEGORY_WORDS[cid]]
+        # the shelves (influencers, games, food ...) are asked "which ... do you know?" too, and their words are
+        # no everyday verbs: they need no "I" or "my"
+        hit = (mine or cid in SHELF_NODE_IDS) and any(  # `raw` too: _fold makes "YouTubers" "you tubers"
+            re.search(rf"\b{re.escape(w)}{CATEGORY_ENDING}\b", low) or
+            re.search(rf"\b{re.escape(w)}{CATEGORY_ENDING}\b", raw) for w in english)
+        if not hit and cid == "u:work":
+            hit = bool(WORK_ASKED.search(raw))
+        if not hit:
+            for start in CATEGORY_STARTS.get(cid, ()):
+                # "projects" starts like "proje" but is English: it goes by the English rule above
+                for m in re.finditer(rf"\b{re.escape(_fold(start))}\w*", low):
+                    hit = hit or not any(m.group(0).startswith(w) for w in english)
+                for m in re.finditer(rf"\b{re.escape(start)}\w*", raw):
+                    hit = hit or not any(_fold(m.group(0)).startswith(w) for w in english)
+        if hit:
+            out.append(cid)
+    return out
 
 
 def _path(nid, by_id):
@@ -1899,15 +2009,49 @@ def _follow(node, by_id, kids, links, limit=FOLLOW_LINES):
     return out
 
 
+def _word_stem(word):
+    """A folded word without its English ending: "reviews", "reviewing" -> "review", "lives", "living" -> "liv",
+    "studies", "study" -> "stud", "planned" -> "plan". For the word search over the whole memory, which went by the
+    first four letters until 2026-11-10: "press" found "President", "remove" "remote access", "continue"
+    "contains", "computer" "completed", "fullscreen" "Full name", "rating" "ratios" (the logs of a week)."""
+    for _ in range(2):
+        for end, least in (("ing", 3), ("ed", 3), ("s", 4)):
+            if word.endswith(end) and len(word) - len(end) >= least and not word.endswith("ss"):
+                word = word[:-len(end)]
+                break
+        else:
+            break
+    while len(word) > 3 and word[-1] in "eiy":
+        word = word[:-1]
+    if len(word) > 3 and word[-1] == word[-2]:
+        word = word[:-1]
+    return word
+
+
+def _scan_stems(text):
+    """The stems of the message's words that may search the whole memory: SCAN_LETTERS or longer, not a filler
+    (NAME_STOP, SCAN_STOP by its first four letters); a Turkish family word as the English ones the facts say."""
+    words = [w for w in _fold(VOCATIVE.sub(" ", re.sub(r"['’]s\b", "", text or ""))).split() if w not in NAME_STOP]
+    if len(words) > SCAN_WORDS_MOST:
+        return set()
+    out = {_word_stem(w) for w in words if len(w) >= SCAN_LETTERS and w[:4] not in SCAN_STOP}
+    out = {s for s in out if len(s) >= 4}  # "trying" -> "try" found "USD/TRY", "coding" -> "cod" found "VS Code"
+    for w in words:
+        for start, english in KIN_WORDS.items():
+            if w.startswith(start):
+                out |= {_word_stem(e) for e in english}
+    return out
+
+
 def _scan(everything, asked, skip):
     """The whole memory, hidden neurons too, for the message's own words (the owner's rule, 2026-11-08: 300 neurons
-    take a fraction of a millisecond). A word most neurons share ("project", "work") says nothing and doesn't count.
-    Best first, [row]."""
-    nodes = [(r, {w[:4] for w in _fold(r["label"]).split()}) for r in everything
+    take a fraction of a millisecond), by word stem (_word_stem). A word most neurons share ("project", "work")
+    says nothing and doesn't count. Best first, [row]."""
+    nodes = [(r, {_word_stem(w) for w in _fold(r["label"]).split()}) for r in everything
              if r["type"] == "fact" and r["id"] not in skip]  # not entities: names are name_matches' ("ethics case")
     common = {w for w in asked if sum(w in stems for _, stems in nodes) > SCAN_COMMON}
-    wanted = asked - common - SCAN_STOP
-    found = [(-_relevance(r["label"], wanted), r["valid_to"] is not None, i, r) for i, (r, stems) in enumerate(nodes)
+    wanted = asked - common
+    found = [(-len(wanted & stems), r["valid_to"] is not None, i, r) for i, (r, stems) in enumerate(nodes)
              if wanted & stems]
     return [f[-1] for f in sorted(found, key=lambda f: f[:3])]
 
@@ -1998,9 +2142,17 @@ def _names_in(r, by_id):
     return out
 
 
+def _own_names(rows):
+    """The words of the owner's own name, from the name facts right under Identity, hidden ones too (their text is
+    only matched, never sent): {"alex", "sam", "kaya"}."""
+    return {w for r in rows if r["type"] == "fact" and r["parent"] == "u:identity" and NAME_FACT.search(r["label"])
+            for name in NAME_IN_FACT.findall(r["label"]) for w in _fold(name).split() if w not in NOT_A_NAME}
+
+
 def context_for(text):
-    """The memories this message is about, as a note for the request: Identity, then each neuron it names and
-    what hangs on it, then "did you mean" for names only heard close ("" when nothing is known)."""
+    """The memories this message is about, as a note for the request: who the owner is (the name; the rest of
+    Identity when the message is about them), then each neuron it names and what hangs on it, then "did you mean"
+    for names only heard close ("" when nothing is known)."""
     text = HINT.sub("", text or "").strip()  # not the owner's words: every spoken message "found" WhatsApp's "messages"
     if not enabled() or not text:
         return ""
@@ -2028,13 +2180,28 @@ def context_for(text):
 
         identity = [r for r in rows if r["type"] in ("fact", "entity") and r["status"] == "placed"
                     and "u:identity" in _ancestors(r, by_id)]
+        asked, categories = _asked_stems(text), _category_hits(text)
+        mine = bool(ABOUT_ME.search(text.lower().replace("’", "'")))
+        # Of Identity, always only the name. The rest (born, nationality, language) when the message asks about the
+        # owner themself or says its words. All of it went with every message until 2026-11-10: after "Is Turkish"
+        # was learnt, "thank you love" got Turkish replies, "not really" got "You're Turkish, born April 14, 2000",
+        # and the 4b called search_memory with those lines as the query (real 4b, 5 runs each).
+        mine_stems = _scan_stems(text) if mine else set()
+        told = [r for r in identity if NAME_FACT.search(r["label"])]
+        told += [r for r in identity if r not in told and (
+            "u:identity" in categories or mine_stems & {_word_stem(w) for w in _fold(r["label"]).split()})]
         # Not "Identity > Name is ...": told "it says there is no such channel", the 4b searched YouTube for the
         # owner's own name (2026-11-08).
-        add(_read(f"- The owner you are talking to (never a search topic): {r['label']}", r["id"]) for r in identity)
+        add(_read(f"- The owner you are talking to (never a search topic): {r['label']}", r["id"]) for r in told)
+        own = _own_names(everything)  # not someone to look up
         # names: entities and the groups they are in (not the fixed categories, which go by CATEGORY_WORDS)
-        named_rows, shown, exact, asked = {}, {}, set(), _asked_stems(text)
+        named_rows, shown, exact = {}, {}, set()
         for r in rows:
             if r["type"] == "entity" or (r["type"] == "category" and r["source"] == "group"):
+                # A plain word the 4b filed as an entity is no name: "How does this work?" named the entity "Work"
+                # and got its whole branch, "it" in "open it, I am waiting" a "collection" (2026-11-09).
+                if _fold(r["label"]) in PLAIN_WORDS or (" " not in r["label"].strip() and r["label"].islower()):
+                    continue
                 named_rows.setdefault(_fold(r["label"]), []).append(r)
                 shown.setdefault(_fold(r["label"]), r["label"])
         ids = {r["id"] for r in identity}
@@ -2049,6 +2216,10 @@ def context_for(text):
                 if r not in named_rows.setdefault(key, []):
                     named_rows[key].append(r)
                 shown.setdefault(key, name)
+        # "I am Alex Sam Kaya" is not a question about an entity the 4b filed as "Alex" (2026-11-09: "you work
+        # with Alex"), nor about whoever shares the surname.
+        for key in [k for k in named_rows if set(k.split()) <= own]:
+            del named_rows[key]
 
         def follow_all(hits):
             if asked & WHEN_STEMS:  # "When will I go back to Paris?": with "Partly lives in Paris" beside the date
@@ -2069,6 +2240,8 @@ def context_for(text):
             hits = named_rows[name]
             if heard in sure:  # already someone: not "did you mean" someone else with the same surname
                 continue
+            if score < 1.0 and set(heard.split()) <= own:  # the owner's own name, heard as their mother's
+                continue
             if score >= NAME_SURE:
                 sure.add(heard)
                 named += [r for r in hits if r["valid_to"] is None]
@@ -2080,25 +2253,31 @@ def context_for(text):
         # then every neuron in the memory, for the message's own words
         # (a name's own words are spent: "Jane Doe" isn't a search for every Doe)
         # Only words of SCAN_LETTERS and no links: "scroll down two times" found "Has two monitors" and what it links to.
-        rest = _asked_stems(text, SCAN_LETTERS) - {w[:4] for heard in sure for w in heard.split()}
-        categories = _category_hits(text)
+        rest = _scan_stems(text) - {_word_stem(w) for heard in sure for w in heard.split()} - {_word_stem(w) for w in own}
+        spent = set()  # by a stem's first four letters
         if SHELF_NODE_IDS & set(categories):  # the shelves answer this, not all of Interests
             categories = [c for c in categories if c != "u:interests"]
-            rest -= {"foll"}  # "companies I follow" brought "Follows a football club" and the 4b counted it as one
+            spent |= {"foll"}  # "companies I follow" brought "Follows a football club" and the 4b counted it as one
         if INFLUENCERS in categories:  # nor a word search
-            rest -= {"infl", "fene", "crea", "cont", "yout", "stre", "fitn"}
+            spent |= {"infl", "fene", "crea", "cont", "yout", "stre", "fitn"}
         if "u:companies" in categories:  # "companies" found "completed" and "computer science"
-            rest -= {"comp"}
+            spent |= {"comp"}
+        rest = {w for w in rest if w[:4] not in spent}
         for r in _scan([r for r in everything if r["status"] == "placed" and r["id"] not in ids], rest, used)[:SCAN_HITS]:
             follow = _follow(r, by_id, kids, {}, 2)
             add(_line(x, by_id) for x in follow)
             used.update(x["id"] for x in follow)
-        found = len(lines) > len(identity)
+        found = len(lines) > len(told)
         for cid in categories:
             cat = by_id.get(cid)
+            above = {a for n in named for a in _ancestors(n, by_id)}
             if cid in SHELF_NODE_IDS:  # even with a name in it: "someone I like other than Sam"
                 add(_shelf_lines(text, cid, by_id, kids))
-            elif cat and not any(cid in _ancestors(n, by_id) for n in named):  # a named project says enough
+            elif cid == "u:identity" or cid in above or (cid in OWN_WORK and OWN_WORK & above):
+                # Identity went above. A named project says enough: "Open QDA project" (QDA is under Work) also
+                # listed all twenty of Projects, for the word "project" (2026-11-09).
+                continue
+            elif cat:
                 add(_summary(cat, by_id, kids, asked, quiet=found))
         words = {w[:4] for w in _fold(text).split() if len(w) > 3 and w not in NAME_STOP}
         add(_line(r, by_id) for r in rows if r["status"] == "inbox" and r["type"] == "fact"
@@ -2116,14 +2295,28 @@ def context_for(text):
             return ""
         recalled = [n["id"] for n in named] + list(used)
         s.retrieve(trail or recalled, used=recalled)
-        # The rules are short now that the note holds only what the message is about; the dates stay written out:
-        # the 4b said "Safe travels to Paris tomorrow!" nine days early (2026-11-08).
-        # A Link here is the real one: the 4b opened a made-up "@samcreator1" while the right one was in a file
-        # it had read before (2026-11-08).
-        return ("\n\n(What you remember about the owner, for this message only. Use it only if it fits. Say a date "
-                "exactly as written here, and say today, tomorrow or a number of days only if it is written next to "
-                "that date. A fact with no date has no date: never add one. A Link or PC path here is real: open it "
-                "as written instead of searching:\n" + "\n".join(lines) + ")")
+        # A line with its PC path or Link goes first, under who the owner is: "Could you open Umay project" had the
+        # path in the fifth line, under four facts about the project, and the 4b opened ...\Umay\Umay (2026-11-09).
+        lines[len(told):] = sorted(lines[len(told):], key=lambda ln: not any(m in ln for m in MARKS))
+        # A rule only where the note has what it is about. Every message carried all of them until 2026-11-10 and
+        # the 4b answered the rules: "Who am I?" got "Today is Monday. Tomorrow will be Tuesday. In about two days
+        # ...", "How old am I?" got "you turned 26 today". The dates stay written out where there is one: the 4b said
+        # "Safe travels to Paris tomorrow!" nine days early (2026-11-08). A Link here is the real one: the 4b opened
+        # a made-up "@samcreator1" while the right one was in a file it had read before (2026-11-08).
+        if len(lines) == len(told):
+            # Nothing but who they are: one plain line. Under the heading below, a short "How does this work?"
+            # (about a news story) was answered about the note itself: "you've been using Sam quite a bit", or
+            # search_memory("Sam memory for this message only"), 5 of 10; with this line the 4b looked the story
+            # up, 10 of 10 (real 4b, 2026-11-10).
+            return "\n\n(The owner you are talking to: " + "; ".join(r["label"] for r in told) + ".)"
+        body = "\n".join(lines)
+        rules = ["What you remember about the owner, for this message only", "Use it only if it fits"]
+        if asked & WHEN_STEMS or DAY_DATE.search(body) or "[said on " in body:
+            rules += ["Say a date exactly as written here, and say today, tomorrow or a number of days only if it is "
+                      "written next to that date", "A fact with no date has no date: never add one"]
+        if any(m in body for m in MARKS):
+            rules.append("A Link or PC path here is real: open it as written instead of searching")
+        return "\n\n(" + ". ".join(rules) + ":\n" + body + ")"
     except Exception as e:  # memory must never break a reply
         _log(f"context failed: {type(e).__name__}: {e}")
         return ""
@@ -2320,7 +2513,7 @@ def start(folder, can_run, search=None, remaining=None, away=lambda: False, news
     away() -> the owner is AFK (full pass and research only then); news() -> who the newsfeed follows."""
     if _learner["it"] is not None or not enabled():
         return
-    learner = Learner(store(), folder, search=search, remaining=remaining, away=away, news=news)
+    learner = Learner(store(), folder, ask=ask, search=search, remaining=remaining, away=away, news=news)
     _learner["it"] = learner
 
     def loop():

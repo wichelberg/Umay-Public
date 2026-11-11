@@ -10,7 +10,10 @@ unloads it for a game.
 Measured on the RTX 5070 Laptop with qwen3.5:4b (Q4_K_M): 3.7 GB of VRAM at 4096 tokens, a tool call
 in ~0.6 s and a reply after a tool in ~0.4-0.9 s.
 
-.env: UMAY_LLM (local | openrouter), UMAY_LOCAL_MODEL, UMAY_LOCAL_BASE_MODEL, UMAY_LOCAL_CONTEXT.
+.env: UMAY_LLM (local | openrouter), UMAY_LOCAL_MODEL, UMAY_LOCAL_BASE_MODEL, UMAY_LOCAL_CONTEXT,
+UMAY_TOOL_CHOICE (npu: picks()), UMAY_LOCAL_VISION (off: sees()), UMAY_LOCAL_TEMPLATE (llama3: TEMPLATES),
+UMAY_LOCAL_IDLE_MINUTES (5; dormant(): unloaded after that long without a reply, 0 = kept),
+UMAY_MEMORY_MODEL (memory_model(): the memory's own model on the GPU while she rests).
 """
 import contextlib
 import os
@@ -25,6 +28,9 @@ BASE_URL = "http://127.0.0.1:11434"
 CHAT_URL = f"{BASE_URL}/v1/chat/completions"
 BUSY_SECONDS = 5  # like voice._Worker: the GPU load right after a reply is still partly ours
 KEEP_ALIVE = "30m"
+# Nobody answered this long: voice_guard unloads the model and loads nothing ahead (dormant). The owner's rule,
+# 2026-11-11: RAM and VRAM aren't held for a reply nobody asks for; the next reply loads it again (~5-10 s).
+IDLE_MINUTES = 5   # the owner, 2026-11-11: as long as the PC takes to count them away (companion)
 
 
 def _env(name, default):
@@ -35,6 +41,19 @@ def _env(name, default):
 def on():
     """Umay's replies come from the local model (UMAY_LLM=openrouter: from OpenRouter)."""
     return _env("UMAY_LLM", "local").lower() != "openrouter"
+
+
+def picks():
+    """UMAY_TOOL_CHOICE=npu: the NPU's decision model names each tool (tool_pick.choose) and this model only writes
+    the tool's arguments and speaks (ai_assistant._picked_loop). So it needs no tool calling of its own: a
+    roleplay model can be Umay's voice (the owner's choice 2026-11-11: L3-8B-Stheno)."""
+    return on() and _env("UMAY_TOOL_CHOICE", "").lower() == "npu"
+
+
+def sees():
+    """The model takes images (qwen3.5 does). UMAY_LOCAL_VISION=off for a text-only one: a screenshot is then
+    put into words for it by the heavy model (ai_assistant._seen)."""
+    return _env("UMAY_LOCAL_VISION", "on").lower() != "off"
 
 
 def base_model():
@@ -50,8 +69,26 @@ def model():
 
 
 _made = {"model": None}
-_state = {"working": 0, "last": 0.0, "answering": 0, "answered": 0.0}
+_state = {"working": 0, "last": 0.0, "answering": 0, "answered": 0.0, "started": time.monotonic()}
 _lock = threading.Lock()
+
+
+# Chat templates Ollama gets wrong by itself (UMAY_LOCAL_TEMPLATE names one). A GGUF pulled from Hugging Face
+# gets ChatML when Ollama doesn't know its own template: L3-8B-Stheno, a Llama 3 model, was served with
+# <|im_start|> tags it was never trained on (2026-11-11).
+TEMPLATES = {"llama3": {
+    "template": ("{{ if .System }}<|start_header_id|>system<|end_header_id|>\n\n{{ .System }}<|eot_id|>{{ end }}"
+                 "{{ if .Prompt }}<|start_header_id|>user<|end_header_id|>\n\n{{ .Prompt }}<|eot_id|>{{ end }}"
+                 "<|start_header_id|>assistant<|end_header_id|>\n\n{{ .Response }}<|eot_id|>"),
+    "stop": ["<|start_header_id|>", "<|end_header_id|>", "<|eot_id|>"]}}
+
+
+def _creation():
+    """What /api/create is asked for model(): the base model, the window and, if named, the chat template."""
+    known = TEMPLATES.get(_env("UMAY_LOCAL_TEMPLATE", "").lower())
+    return {"model": model(), "from": base_model(), "stream": False,
+            "parameters": {"num_ctx": context(), **({"stop": known["stop"]} if known else {})},
+            **({"template": known["template"]} if known else {})}
 
 
 def ensure_model():
@@ -63,9 +100,7 @@ def ensure_model():
     tags = requests.get(f"{BASE_URL}/api/tags", timeout=5)
     tags.raise_for_status()
     if not any(m.get("name") in (name, f"{name}:latest") for m in tags.json().get("models", [])):
-        made = requests.post(f"{BASE_URL}/api/create", json={
-            "model": name, "from": base_model(), "parameters": {"num_ctx": context()}, "stream": False,
-        }, timeout=120)
+        made = requests.post(f"{BASE_URL}/api/create", json=_creation(), timeout=120)
         made.raise_for_status()
     _made["model"] = name
 
@@ -100,13 +135,46 @@ def answering():
     return _state["answering"] > 0 or time.monotonic() - _state["answered"] < BUSY_SECONDS
 
 
-def vram_mb():
-    """VRAM the loaded model takes (0 when it isn't loaded or Ollama doesn't answer)."""
+def idle_minutes():
+    """UMAY_LOCAL_IDLE_MINUTES (IDLE_MINUTES): no reply for this long makes the model dormant(); 0 = never."""
+    try:
+        return max(0.0, float(_env("UMAY_LOCAL_IDLE_MINUTES", str(IDLE_MINUTES))))
+    except ValueError:
+        return IDLE_MINUTES
+
+
+def dormant():
+    """No reply to the owner for idle_minutes() (counted from Umay's start before the first one): voice_guard then
+    lets the model go. Memory work (background) doesn't wake it."""
+    minutes = idle_minutes()
+    last = max(_state["answered"], _state["started"])
+    return minutes > 0 and not answering() and time.monotonic() - last > minutes * 60
+
+
+def quiet():
+    """Background work that loads models of its own (the memory's reading) may run: no reply for idle_minutes()
+    (dormant), so it doesn't stack on the talker and the voice. 2026-11-11: the memory's work right after each talk
+    (a second NPU server, 5.4 GB, and Whisper's stand-in, 2.6 GB) took the RAM to 97%. idle_minutes() 0: whenever
+    no reply is being made, as before."""
+    return not answering() and (idle_minutes() == 0 or dormant())
+
+
+def memory_model():
+    """UMAY_MEMORY_MODEL: the Ollama model the memory's text work uses (memory_cortex.ask_json,
+    conversation_memory.ask_local). The owner's plan, 2026-11-11: in use, the talker has the VRAM; while she rests
+    (quiet: when the memory works) the talker goes and the model best at the memory takes the GPU instead, so
+    nothing of it sits in RAM (the NPU's chat server took 5.4 GB of RAM for it). voice_guard lets it go when the
+    owner is back or a game starts. Empty: the NPU's chat model (UMAY_NPU_CHAT) or the talker, as before."""
+    return _env("UMAY_MEMORY_MODEL", "")
+
+
+def vram_mb(name=None):
+    """VRAM a loaded model takes, model() unless named (0 when it isn't loaded or Ollama doesn't answer)."""
     try:
         loaded = requests.get(f"{BASE_URL}/api/ps", timeout=2).json().get("models", [])
     except (requests.RequestException, ValueError):
         return 0
-    name = model()
+    name = name or model()
     return sum(m.get("size_vram", 0) for m in loaded if m.get("name") in (name, f"{name}:latest")) / 2 ** 20
 
 
@@ -117,9 +185,9 @@ def load():
                   timeout=180).raise_for_status()
 
 
-def unload():
-    """Frees the model's VRAM now (a game started). Quiet if Ollama isn't running."""
+def unload(name=None):
+    """Frees a model's VRAM now, model() unless named (a game started, she rests). Quiet if Ollama isn't running."""
     try:
-        requests.post(f"{BASE_URL}/api/generate", json={"model": model(), "keep_alive": 0}, timeout=10)
+        requests.post(f"{BASE_URL}/api/generate", json={"model": name or model(), "keep_alive": 0}, timeout=10)
     except requests.RequestException:
         pass

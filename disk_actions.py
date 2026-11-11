@@ -31,6 +31,9 @@ from disk_tools import NO_CREATE_WINDOW, norm, under
 MEI_MIN_AGE_SECONDS = 3600
 TEMP_MIN_AGE_SECONDS = 86400
 TOMB = ".umay-delete"
+# PyInstaller's unpack folder: _MEI and a hex number ("_MEI000070f02" since PyInstaller 6). With \d+ only the
+# all-digit ones were cleaned: 177 folders of ~0.5 GB, 25 GB of Temp, piled up by 2026-11-11.
+MEI_NAME = r"_MEI[0-9a-f]+"
 DEFAULT_BIN_SHARE = 0.05  # Windows' default Recycle Bin size: 5% of the drive
 
 
@@ -297,7 +300,7 @@ def execute(p, pl, runner=None, bin_limit=None, bin_used=None):
                 check_path(path, pl)
             skipped = []
             for path in p.paths:
-                if re.fullmatch(r"_MEI\d+", os.path.basename(path), re.I):
+                if re.fullmatch(MEI_NAME, os.path.basename(path), re.I):
                     if not _remove_mei(path):
                         skipped.append(path)
                 elif os.path.exists(path):
@@ -339,7 +342,7 @@ def clean_old_files(folder, own="", min_age=None, now=None, runner=None):
     min_age = TEMP_MIN_AGE_SECONDS if min_age is None else min_age
     skipped = []
     for e in os.scandir(folder):
-        if re.fullmatch(r"_MEI\d+", e.name, re.I) or (own and norm(e.path) == norm(own)):
+        if re.fullmatch(MEI_NAME, e.name, re.I) or (own and norm(e.path) == norm(own)):
             continue
         try:
             st = e.stat(follow_symlinks=False)
@@ -398,7 +401,7 @@ def clean_mei(temp=None, own=None, min_age=MEI_MIN_AGE_SECONDS, now=None):
     except OSError:
         return removed, kept
     for e in entries:
-        m = re.fullmatch(r"_MEI\d+(" + re.escape(TOMB) + ")?", e.name, re.I)
+        m = re.fullmatch(MEI_NAME + "(" + re.escape(TOMB) + ")?", e.name, re.I)
         if not m or not e.is_dir(follow_symlinks=False):
             continue
         if own and norm(e.path) == norm(own):

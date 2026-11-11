@@ -20,11 +20,13 @@ main thread, and a crash here never takes Umay down.
 
 stdin (from Umay), one JSON object per line: {"state": "idle|listening|thinking|researching|working|
 speaking"}, {"level": 0..1} (her voice while she speaks), {"say": text, "id": n, "seconds": s},
-{"visible": bool}, {"muted": bool} (Ctrl+F3), {"open": panel} (its detail view), {"balances": {"openrouter", "tavily"}},
-{"disk": {"running", "progress"}}, {"disk_result": {"id", "text", "ok"}}. Its end (Umay closed) ends the HUD.
+{"visible": bool}, {"muted": bool} (she isn't listening), {"open": panel, "toggle": bool} (its detail view; "audio":
+Ctrl+F3's panel, hud_audio.py), {"balances": {"openrouter", "tavily"}}, {"disk": {"running", "progress"}},
+{"disk_result": {"id", "text", "ok"}}, {"audio": {...}} (the audio panel's state). Its end (Umay closed) ends the HUD.
 stdout (to Umay): {"event": "ready"}, {"event": "click"} (the orb), {"event": "say_click", "id": n},
 {"orb": [x, y, w, h]} (where the orb is, Qt's logical px), {"event": "balances" | "disk_state" | "disk_scan"},
-{"event": "disk_delete", "id": item id}.
+{"event": "disk_delete", "id": item id}, {"event": "audio_state", "scan": bool},
+{"event": "audio_set", "input" | "output": name, "muted": bool}.
 
 Saved in %LOCALAPPDATA%\\Umay\\hud.json (UMAY_HUD_FILE). Log: %LOCALAPPDATA%\\Umay\\hud.log.
 """
@@ -44,6 +46,7 @@ from PySide6.QtGui import (QColor, QConicalGradient, QCursor, QGuiApplication, Q
                            QPainterPath, QPen, QRadialGradient)
 from PySide6.QtWidgets import QApplication, QMenu, QWidget
 
+import hud_audio
 import hud_credits
 import hud_data
 import hud_detail
@@ -53,7 +56,7 @@ import hud_markets
 import hud_news
 import hud_views
 import panel_text
-from hud_paint import (C, bar, color, font, gauge, lerp, load_fonts, mix, ring, rule, text,
+from hud_paint import (C, bar, color, font, gauge, lerp, load_fonts, mix, ring, rule, split_bar, text,
                       weather_icon)
 import cortex_graph
 import hud_cortex
@@ -686,33 +689,27 @@ class VitalsPanel(Panel):
         rule(p, 26, 262, w - 52)
         text(p, 26, 292, "MEMORY", font(12, 600, 2.4), C["muted"])
         text(p, w - 26, 292, f"{d['ram_used']:.1f} / {d['ram_total']:.0f} GB", font(12, 400, mono=True), C["text"], "right")
-        bar(p, 26, 302, w - 52, d["ram_used"] / d["ram_total"])
+        # Umay's models in their own color inside the used RAM (the owner, 2026-11-11), like the VRAM below
+        models = min(d.get("ram_models", 0.0), d["ram_used"])
+        split_bar(p, 26, 302, w - 52, d["ram_total"], ((models, C["amber"], 1.0, f"UMAY MODELS {models:.1f}"),
+                                                       (d["ram_used"] - models, C["cyan2"], 0.45,
+                                                        f"OTHER {d['ram_used'] - models:.1f}")))
         if gpu:
-            text(p, 26, 340, "VRAM", font(12, 600, 2.4), C["muted"])
-            text(p, w - 26, 340, f"{gpu['mem_used']:.1f} / {gpu['mem_total']:.1f} GB", font(12, 400, mono=True),
+            text(p, 26, 356, "VRAM", font(12, 600, 2.4), C["muted"])
+            text(p, w - 26, 356, f"{gpu['mem_used']:.1f} / {gpu['mem_total']:.1f} GB", font(12, 400, mono=True),
                  C["text"], "right")
-            bw = w - 52
-            p.fillRect(QRectF(26, 350, bw, 4), color(C["cyan"], 0.12))
             llm = min(d["llm_vram"], gpu["mem_used"])
             other = max(0.0, gpu["mem_used"] - llm)
-            x = 26
-            for amount, col in ((llm, QColor(C["cyan"])), (other, color(C["cyan2"], 0.45))):
-                seg = bw * amount / gpu["mem_total"]
-                p.fillRect(QRectF(x, 350, seg, 4), col)
-                x += seg + (2 if seg else 0)
-            f = font(11, 400, mono=True)
-            text(p, 26, 376, "■", f, C["cyan"])
-            text(p, 40, 376, f"UMAY LLM {llm:.1f}", f, C["muted"])
-            text(p, 170, 376, "■", f, color(C["cyan2"], 0.6))
-            text(p, 184, 376, f"OTHER {other:.1f}", f, C["muted"])
-        rule(p, 26, 404, w - 52)
+            split_bar(p, 26, 366, w - 52, gpu["mem_total"], ((llm, C["cyan"], 1.0, f"UMAY LLM {llm:.1f}"),
+                                                             (other, C["cyan2"], 0.45, f"OTHER {other:.1f}")))
+        rule(p, 26, 420, w - 52)
         up = int(d["uptime"])
         f = font(12, 400, mono=True)
         for i, (lab, val) in enumerate((("NET ↓", rate(d["down"])), ("NET ↑", rate(d["up"])),
                                         ("UP", f"{up // 3600:02}:{up % 3600 // 60:02}:{up % 60:02}"))):
             x = 26 + i * 132
-            lw = text(p, x, 436, lab + " ", f, C["muted"])
-            text(p, x + lw, 436, val, f, C["text"])
+            lw = text(p, x, 452, lab + " ", f, C["muted"])
+            text(p, x + lw, 452, val, f, C["text"])
 
 
 class StoragePanel(Panel):
@@ -975,7 +972,8 @@ class PanelsButton(QWidget):
 
 
 class MutedMic(QWidget):
-    """A struck-through microphone right above the panels button, only while Ctrl+F3 has her not listening."""
+    """A struck-through microphone right above the panels button, only while she isn't listening (the audio
+    panel's STOP LISTENING). A click opens that panel (Ctrl+F3), which also grows from this spot."""
 
     SIZE, MARGIN, GAP = PanelsButton.SIZE, PanelsButton.MARGIN, 8
 
@@ -985,9 +983,15 @@ class MutedMic(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.muted = False
+        self.on_click = None
         self.setFixedSize(self.SIZE, self.SIZE)
-        self.setToolTip("Microphone muted (Ctrl+F3)")
+        self.setToolTip("Not listening. Click (or Ctrl+F3): the audio panel")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.relocate()
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.MouseButton.LeftButton and self.on_click is not None:
+            self.on_click()
 
     def relocate(self):
         g = QGuiApplication.primaryScreen().availableGeometry()
@@ -1236,23 +1240,29 @@ def main(umay_pid=0):
     panels["credits"].lang = shared.lang
     views = {"weather": hud_views.WeatherView, "vitals": hud_views.VitalsView, "storage": hud_disk.StorageView,
              "calendar": hud_views.CalendarView, "credits": hud_credits.CreditsView, "news": hud_news.NewsView,
-             "markets": hud_markets.MarketsView}
+             "markets": hud_markets.MarketsView, "audio": hud_audio.AudioView}
     detail = {"it": None}
 
-    def open_detail(name):
-        """A panel's detail view, grown from where the panel is (one at a time)."""
-        panel = panels.get(name)
-        if panel is None or name not in views or not shown["on"]:
+    def open_detail(name, toggle=False):
+        """A panel's detail view, grown from where the panel is (one at a time). "audio" (Ctrl+F3) has no panel:
+        it grows from the microphone's spot above the panels button, also while the HUD is hidden. toggle: an
+        open one closes instead."""
+        panel = panels.get(name) if name != "audio" else mic
+        if panel is None or name not in views or (not shown["on"] and name != "audio"):
             return
         current = detail["it"]
         if current is not None and not current.closing:
             if current.name() == name:
-                current.raise_()
-                current.activateWindow()
+                if toggle:
+                    current.close_detail()
+                else:
+                    current.raise_()
+                    current.activateWindow()
                 return
             current.close_detail()
         try:
-            d = hud_detail.Detail(views[name](shared), panel.geometry(), panel.screen(), closed)
+            screen = panel.screen() if name != "audio" else QGuiApplication.primaryScreen()
+            d = hud_detail.Detail(views[name](shared), panel.geometry(), screen, closed)
         except Exception:
             log("detail view failed:\n" + traceback.format_exc())
             return
@@ -1282,6 +1292,7 @@ def main(umay_pid=0):
 
     button = PanelsButton(store, panels.values())
     mic = MutedMic()
+    mic.on_click = lambda: open_detail("audio", toggle=True)
 
     def show_all(on):
         shown["on"] = on
@@ -1368,7 +1379,12 @@ def main(umay_pid=0):
             mic.muted = bool(m["muted"])
             mic.setVisible(shown["on"] and mic.muted)
         if "open" in m:
-            open_detail(str(m["open"]))
+            open_detail(str(m["open"]), bool(m.get("toggle")))
+        if "audio" in m:
+            shared.data["audio"] = m["audio"]
+            mic.muted = bool((m["audio"] or {}).get("muted"))
+            mic.setVisible(shown["on"] and mic.muted)
+            notify("audio")
         if "refresh" in m and shared.wake.get(str(m["refresh"])) is not None:  # who is followed changed
             shared.wake[str(m["refresh"])].set()
         if "balances" in m:

@@ -135,6 +135,15 @@ def open_detail(name):
     _send({"open": name})
 
 
+def open_audio():
+    """Thread-safe: opens the audio panel (Ctrl+F3: listening, the microphone, the speakers), or closes it if it is
+    open; even while the HUD is hidden. False when there is no HUD to show it."""
+    if pid() is None:
+        return False
+    _send({"open": "audio", "toggle": True})
+    return True
+
+
 def _voice_level(proc):
     """Her voice's loudness to the orb while she speaks."""
     while proc.poll() is None:

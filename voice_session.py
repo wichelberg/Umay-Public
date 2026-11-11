@@ -216,7 +216,7 @@ _session = {"it": None}
 
 def _local_transcribe(wav_bytes):
     """Only the local Whisper: an empty answer rather than a paid one."""
-    if not (voice.stt_on() and voice.local_stt.loaded()):
+    if not (voice.stt_on() and voice.hears()):
         return ""
     return voice.local_stt.transcribe(wav_bytes) or ""
 
@@ -283,12 +283,18 @@ _mute_lock = threading.Lock()
 
 
 def toggle_mute():
-    """Ctrl+F3: she stops listening (the wake phrase and a conversation going on the microphone, which ends), or
-    listens again. Returns whether she is muted now. Not kept across a restart."""
+    """She stops listening (the wake phrase and a conversation going on the microphone, which ends), or listens
+    again. Returns whether she is muted now. Not kept across a restart."""
+    return set_mute(not voice.muted["on"])
+
+
+def set_mute(on):
+    """The Ctrl+F3 panel's STOP / START LISTENING (and toggle_mute): muted or not, at once. Returns whether she is
+    muted now."""
     import wake
 
     with _mute_lock:
-        voice.muted["on"] = not voice.muted["on"]
+        voice.muted["on"] = bool(on)
         muted = voice.muted["on"]
         try:
             wake.mute_changed()

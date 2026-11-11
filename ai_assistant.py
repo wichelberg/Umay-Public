@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import re
@@ -15,6 +16,7 @@ from tavily import TavilyClient
 
 import i18n
 import paths
+import audio_devices
 import browser_tools
 import calendar_tools
 import chat_box
@@ -30,6 +32,7 @@ import hud
 import input_tools
 import local_llm
 import mail_tools
+import npu
 import memory_cortex
 import memory_editor
 import market_outlook
@@ -46,6 +49,8 @@ import spotify_tools
 import steam_tools
 import system_tools
 import task_plan
+import tool_pick
+import voice
 import voice_confirm
 import web_control
 import web_find
@@ -98,9 +103,14 @@ STYLE = (
     "for an explanation or details. Lead with the result. No filler: don't restate the request, don't describe "
     "the screen or a tool's output unless asked, no \"Let me know if you need anything else\", no \"I hope\", "
     "no \"Great question\". Call the user \"dear\" the way Jarvis says \"sir\" (never \"sir\"): often, at most "
-    "once in a reply. The tone (these show the tone only, never their content): \"Done, dear.\" \"On it.\" "
-    "\"Found it, dear. It's open now.\" \"I couldn't find that folder. Another name, perhaps?\""
+    "once in a reply. After a tool did what was asked, a few words are enough (\"Done, dear.\"); when it "
+    "couldn't, say what is missing in one line (\"I couldn't find that folder. Another name, perhaps?\"). Never "
+    "say that something is done, found or open when no tool did it for this message: to thanks, a remark or "
+    "small talk, just answer the person."
 )
+# Until 2026-11-10 the tone was shown with four lines to copy ("Done, dear." "On it." "Found it, dear. It's open
+# now." ...), and the 4b copied them: "not really" got "Found it, dear. It's open now. On it.", "Thank you love" got
+# "Done, dear.", and her own news lines opened with "Found it, dear." (companion.py uses this text too).
 
 
 # The last two rules are for the small local model: it added details no tool had returned ("you were
@@ -139,12 +149,29 @@ OPENROUTER_KEY_ENV = "OPENROUTER_API_KEY"
 # chat["mode"] is always "umay".
 if local_llm.on():
     _provider = {"provider": "Ollama", "url": local_llm.CHAT_URL, "key_env": None, "model": local_llm.model(),
-                 "local": True}
+                 "local": True, "picks": local_llm.picks(), "sees": local_llm.sees()}
 else:
     _provider = {"provider": "OpenRouter", "url": OPENROUTER_URL, "key_env": OPENROUTER_KEY_ENV,
                  "model": os.environ.get("OPENROUTER_MODEL", "").strip() or "google/gemini-3.7-flash",
-                 "local": False}
-MODES = {"umay": {**_provider, "system": f"{_load_personality()}\n\n{TOOL_HINTS}"}}
+                 "local": False, "picks": False, "sees": True}
+# "picks" (UMAY_TOOL_CHOICE=npu, local_llm.picks): the model never sees the tool list. The NPU's decision model
+# names each tool, this model writes its arguments and speaks (_picked_loop), so its prompt is about answering
+# from results, not about which tool to call.
+PICKED_HINTS = (
+    "Always reply in English, whatever language the user writes in. You don't run tools yourself: when the user's "
+    "message needed one, it has already run, and its result is in the conversation in [square brackets]. Say what "
+    "that result says in your own voice: never add details it didn't return, and never say something is done, "
+    "open, sent, saved or found unless a result says so. When no result is there for something the user asked "
+    "you to do, say plainly that you couldn't do it. What you know about the user is only what this conversation "
+    "and the notes in it say: asked something about them that isn't there, say you don't know it yet, never "
+    "guess. The same for the world: the weather, the news, a price, what someone did lately are only known when "
+    "a result holds them; without one, say you haven't looked it up. Don't name your tools or their settings. No "
+    "emoji. You can't send mail: you open a draft and the user "
+    "presses Send. You have no way to save to memory yourself: never say you added, saved, noted or recorded "
+    "something. Say instead that you will learn it when the conversation ends (saying goodbye makes it now)."
+)
+MODES = {"umay": {**_provider,
+                  "system": f"{_load_personality()}\n\n{PICKED_HINTS if _provider['picks'] else TOOL_HINTS}"}}
 
 _state = {"listener": None, "chat": None, "log_path": None}  # chat/log_path: the open text box
 _lock = threading.Lock()
@@ -163,6 +190,57 @@ SCREEN_RULE = ("\n(The owner means something that is already on the screen. Call
 # chat" and, another time, "I've added them to your memory" (2026-11-08).
 MEMORY_RULE = ("\n(Your memory: what the owner tells you is learnt on its own once this conversation ends. Never say "
                "you forget it or can't remember it, and never say you already saved it.)")
+# Only on a message that is about her memory or tells her something about the owner. On every message (until
+# 2026-11-10) the 4b answered the rule: "thank you love" got "I'll keep that in mind for our conversations", a
+# goodbye "I'll make sure to remember that", and the reply to a news story was about her own memory.
+MEMORY_ASKED = re.compile(
+    r"\b(?:remember\w*|memor\w+|forget\w*|forgot\w*|sav(?:e|ed|ing)|not(?:e|ed)\s+(?:it|that|this)|learn\w*|"
+    r"hat[ıi]rla\w*|unut\w*|kaydet\w*|akl[ıi]nda)\b", re.IGNORECASE)
+_NOT_A_FACT = r"(?!not\b|waiting|going|trying|looking|talking|just|here|back|done|sorry|about|great|fine|good|ok)"
+OWNER_TELLS = re.compile(
+    rf"\b(?:i\s+am\s+{_NOT_A_FACT}|i'm\s+{_NOT_A_FACT}|i\s+(?:also\s+|really\s+|just\s+)?(?:like|love|hate|live|use|"
+    r"own|bought|study)\b|my\s+[\w']+(?:\s+[\w']+)?\s+(?:is|are|was)\b|my\s+name\b|"
+    # how she should address them or behave is told to her memory as well: "Only use my middle name"
+    r"call\s+me\b|from\s+now\s+on\b|only\s+use\b|always\b|never\b)", re.IGNORECASE)
+# Thanks, a goodbye, "nothing", "not really": nothing to do, so the 4b gets no tools for it. With them it called
+# search_memory, web_search and follow_news on "Nothing love. Thank you bye" and answered "I've removed WRC from your
+# newsfeed" (2026-11-09; real 4b on five such lines from the logs, 5 runs each: a tool in 7 of 25). Not when the
+# line starts by agreeing ("okay, thank you" may accept an offer) unless it also closes ("okay then", "bye").
+SMALL_WORDS = {"thank", "thanks", "thx", "you", "u", "very", "much", "so", "a", "lot", "for", "informing", "telling",
+               "that", "that's", "thats", "it", "the", "info", "help", "helping", "update", "bye", "goodbye", "see",
+               "later", "night", "goodnight", "nothing", "no", "nope", "not", "really", "now", "else", "anything",
+               "all", "then", "good", "great", "perfect", "nice", "cool", "lovely", "awesome", "well", "oh",
+               "umay", "love", "dear", "darling", "honey", "my", "ok", "okay", "okey", "alright", "fine",
+               "teşekkürler", "teşekkür", "tesekkur", "tesekkurler", "ederim", "sağol", "sagol", "sağ", "ol", "tamam",
+               "peki", "yok", "hayır", "hayir", "görüşürüz", "gorusuruz", "hoşçakal", "iyi", "geceler", "eyvallah"}
+SMALL_CORE = {"thank", "thanks", "thx", "bye", "goodbye", "goodnight", "night", "later", "nothing", "no", "nope", "not",
+              "teşekkürler", "teşekkür", "tesekkur", "tesekkurler", "sağol", "sagol", "yok", "hayır", "hayir",
+              "görüşürüz", "gorusuruz", "hoşçakal", "geceler", "eyvallah"}
+SMALL_HINTS = "Always reply in English, whatever language the user writes in. No emoji."
+# Today's date goes after the owner's message only when the message or its memories are about a time. After every
+# message (until 2026-11-10) the 4b read it back: "Who am I?" got "Today is Monday, November 9th. Tomorrow will be
+# Tuesday", a thank-you "Happy Tuesday morning". The clock stays in the system prompt for everything else.
+TIME_ASKED = re.compile(
+    r"\d|\b(?:today|tonight|tomorrow|yesterday|now|date|days?|weeks?|weekend|months?|years?|time|clock|hours?|"
+    r"minutes?|morning|afternoon|evening|night|noon|midnight|when|alarms?|remind\w*|calendar|events?|schedul\w*|"
+    r"plans?|meetings?|appointments?|deadline|birthday|old|age|born|early|late|later|soon|ago|since|until|"
+    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|may|june|july|august|"
+    r"september|october|november|december|bug[üu]n|yar[ıi]n|d[üu]n|saat\w*|tarih\w*|g[üu]n\w*|hafta\w*|ay|"
+    r"y[ıi]l\w*|zaman|hat[ıi]rlat\w*|takvim\w*|ka[cç])\b", re.IGNORECASE)
+SMALL_AGREES = {"ok", "okay", "okey", "alright", "fine", "tamam", "peki"}
+SMALL_CLOSES = {"then", "bye", "goodbye", "nothing", "no", "nope", "not", "görüşürüz", "gorusuruz", "hoşçakal", "yok",
+                "hayır", "hayir"}
+SMALL_WORDS_MOST = 9
+
+
+def small_talk(text):
+    """True for a message that only thanks, says goodbye or declines."""
+    words = re.findall(r"[^\W\d_]+(?:'[^\W\d_]+)?", memory_cortex.HINT.sub("", text or "").lower().replace("’", "'"))
+    if not words or len(words) > SMALL_WORDS_MOST or not all(w in SMALL_WORDS for w in words):
+        return False
+    if words[0] in SMALL_AGREES and not SMALL_CLOSES & set(words):
+        return False
+    return bool(SMALL_CORE & set(words))
 # The text box, yes/no box and the pet's lines (no window toggle any more): UMAY_LANGUAGE, English by default.
 _language = os.environ.get("UMAY_LANGUAGE", "").strip().lower() or "en"
 if _language not in i18n.STRINGS:
@@ -464,12 +542,22 @@ def _request_extras(mode):
     return {"reasoning_effort": "none"} if mode["local"] else {"usage": {"include": True}}
 
 
-def _post(mode, body, timeout):
-    """One request to the mode's endpoint (the local model counts as busy meanwhile, for voice_guard)."""
+def _on_npu(mode):
+    """A game has the GPU and the NPU serves a chat model (UMAY_NPU_CHAT): a picking mode's requests go there
+    meanwhile. Weaker and slower (qwen3.5:4b: ~8 tokens a second), but it takes none of the game's VRAM. Only a
+    picking mode: its requests are a few hundred tokens, the 71-tool prompt would take the NPU 30 s to read."""
+    return bool(mode.get("picks")) and voice.gaming["on"] and npu.chat_ready()
+
+
+def _post(mode, body, timeout, background=False):
+    """One request to the mode's endpoint (the local model counts as busy meanwhile, for voice_guard). background:
+    not a reply to the owner (ask_flash), so it doesn't keep the local model from resting (local_llm.dormant)."""
     if not mode["local"]:
         return requests.post(mode["url"], headers=_headers(mode), json=body, timeout=timeout)
+    if _on_npu(mode):
+        return npu.post_chat({k: v for k, v in body.items() if k != "reasoning_effort"}, timeout=max(timeout, 180))
     local_llm.ensure_model()
-    with local_llm.working():
+    with local_llm.working(background=background):
         # The first request after a game or a restart also loads the model (~5-10 s from disk).
         return requests.post(mode["url"], headers=_headers(mode), json=body, timeout=max(timeout, 120))
 
@@ -477,7 +565,8 @@ def _post(mode, body, timeout):
 def _with_reminder(mode, messages):
     """messages for the request: the latest user text gets this request's memories (memory_cortex, never kept
     in the history) and, for the local model, LANGUAGE_REMINDER, which stays last."""
-    extra = getattr(_memory, "note", "") + (LANGUAGE_REMINDER if mode["local"] else "")
+    extra = getattr(_memory, "note", "") + (
+        (PICKED_REMINDER if mode.get("picks") else LANGUAGE_REMINDER) if mode["local"] else "")
     if not extra:
         return messages
     last = max((i for i, m in enumerate(messages) if m["role"] == "user" and isinstance(m.get("content"), str)),
@@ -488,13 +577,53 @@ def _with_reminder(mode, messages):
         + messages[last + 1:]
 
 
+# After the last result of a turn. Short on purpose: a longer one ("Now tell the user ... a sentence or two ...") came
+# back in the answer as "(Note: I kept my response short and to the point, as per the guidelines.)" (Stheno, 2026-11-11).
+ANSWER_NOW = "\n\n(Reply in English: one or two short sentences. No greeting, no offer of more help.)"
+# The same words after the owner's message, where LANGUAGE_REMINDER goes for the other modes. Without them the
+# roleplay model opened every reply with "Hello <name>," and closed with "Is there anything else I can help with
+# today?", whatever STYLE says a thousand tokens earlier (2026-11-11).
+PICKED_REMINDER = ANSWER_NOW
+# A roleplay model's out-of-character note at the end of an answer: never the owner's to read.
+ASIDE = re.compile(r"\s*[(\[](?:note|ooc|p\.?s\.?)\b[^()\[\]]*[)\]]\s*\Z", re.IGNORECASE)
+RESULT_OPEN = "[Result of {name}]\n"
+NO_PICTURE = "[A screenshot was here; you can't see pictures. Go by what the results say about it.]"
+
+
+def _flat(messages, sees=True):
+    """The conversation for a model with no tool calling of its own (a picking mode): a tool's answer becomes a
+    user-side note in square brackets, the call itself is left out, and the last note of the turn asks for the
+    answer. A copy: the history keeps the OpenAI tool format everything else reads (_transcript, the plan's check)."""
+    names, out = {}, []
+    for m in messages:
+        if m["role"] == "assistant" and m.get("tool_calls"):
+            names.update({tc["id"]: tc["function"]["name"] for tc in m["tool_calls"]})
+            if (m.get("content") or "").strip():
+                out.append({"role": "assistant", "content": m["content"]})
+        elif m["role"] == "tool":
+            note = RESULT_OPEN.format(name=names.get(m.get("tool_call_id"), "the tool")) + str(m.get("content"))
+            if out and out[-1]["role"] == "user" and out[-1].get("_result"):
+                out[-1]["content"] += "\n\n" + note   # several results in a row: one note
+            else:
+                out.append({"role": "user", "content": note, "_result": True})
+        elif isinstance(m.get("content"), list) and not sees:
+            out.append({"role": "user", "content": NO_PICTURE, "_result": True})
+        else:
+            out.append(m)
+    if out and out[-1].get("_result") and isinstance(out[-1]["content"], str):
+        out[-1]["content"] += ANSWER_NOW
+    return [{k: v for k, v in m.items() if k != "_result"} for m in out]
+
+
 def _openai_compat_request(mode, messages, tools=None):
     """Returns (content, tool_calls, cost_in_usd) for the next assistant turn. `tools`: the tool schemas the
     model may use (all of them by default; one step of a plan gets fewer, an answer-only step none)."""
-    schemas = _tools(mode, tools)
+    schemas = [] if mode.get("picks") else _tools(mode, tools)  # a picking mode's model is never shown tools
+    sent = _with_reminder(mode, messages)
     response = _post(mode, {
         "model": mode["model"],
-        "messages": [{"role": "system", "content": _system_prompt(mode)}] + _with_reminder(mode, messages),
+        "messages": [{"role": "system", "content": _system_prompt(mode)}]
+        + (_flat(sent, mode.get("sees", True)) if mode.get("picks") else sent),
         **({"tools": schemas} if schemas else {}),
         **_request_extras(mode),
     }, timeout=60)
@@ -660,6 +789,30 @@ def _drop_images(messages):
             m["content"] = "[screenshot from look_at_screen, no longer attached]"
 
 
+def _turn(chat, user_text):
+    """What one message's requests get besides the conversation: (note, tools). `note` goes after the owner's text
+    in every request of the turn (_with_reminder): the memories the message is about (memory_cortex.context_for:
+    the owner's name and only what it names, no embedding, a few ms; never to a cloud model), today's date, which
+    goes last too (with it only at the top of the prompt the 4b said "Take care in Paris" ten days before the trip,
+    2026-11-07), and MEMORY_RULE where the message is about that. `tools`: None for all of them, [] for a message
+    that only thanks or says goodbye (small_talk; not while a plan waits for an answer)."""
+    known = memory_cortex.context_for(user_text) if MODES[chat["mode"]]["local"] else ""
+    said = memory_cortex.HINT.sub("", user_text or "").replace("’", "'")
+    about_memory = MEMORY_ASKED.search(said) or OWNER_TELLS.search(said)
+    timed = TIME_ASKED.search(said) or memory_cortex.DAY_DATE.search(known)
+    note = known + (f"\n\n(Today is {datetime.now():%A, %d %B %Y, %H:%M}.)" if timed else "") \
+        + (MEMORY_RULE if about_memory else "")
+    return note, ([] if small_talk(user_text) and not chat.get("pending_plan") else None)
+
+
+def _mode_for(chat, tools):
+    """The mode a turn's requests use: a message with no tools to choose from (small_talk) gets her persona
+    without TOOL_HINTS, which are about tools. With them, and no tool list after them, the 4b answered a goodbye
+    with their memory sentence: "it will be saved when we say goodnight" (real 4b, 2026-11-10)."""
+    mode = MODES[chat["mode"]]
+    return {**mode, "system": f"{_load_personality()}\n\n{SMALL_HINTS}"} if tools == [] else mode
+
+
 def _send_message(chat, user_text, source="other"):
     """Sends a message, resolving any tool calls, and returns the final answer text.
     chat["messages"] is mutated in place so the conversation history keeps growing.
@@ -733,26 +886,23 @@ def _send_message(chat, user_text, source="other"):
         user_text += note
         messages[-1]["content"] = user_text
     called, started, answer = [], time.monotonic(), ""
-    # Identity and only what the message names (no embedding, a few ms). The date goes last too: with it only at
-    # the top of the prompt the 4b said "Take care in Paris" ten days before the trip (2026-11-07).
     _memory.owner_said = user_text  # what may stay in anything that leaves the PC
-    known = memory_cortex.context_for(user_text) if MODES[chat["mode"]]["local"] else ""  # never to a cloud model
-    _memory.note = known + f"\n\n(Today is {datetime.now():%A, %d %B %Y, %H:%M}.)" + MEMORY_RULE
-    on_screen = input_tools.points_at_screen(user_text) and not chat.get("pending_plan")
+    _memory.note, tools = _turn(chat, user_text)
+    on_screen = tools is None and input_tools.points_at_screen(user_text) and not chat.get("pending_plan")
     if on_screen:
         _memory.note += SCREEN_RULE
+        tools = [t for t in TOOLS if t["function"]["name"] in SCREEN_TOOLS]
     input_tools.new_turn()
     heavy_model.new_request()  # its call budget (plan 21) starts over
     run = {"cost": 0.0}
     before = hud.current()  # the box, a spoken turn or nothing (Telegram): back to it at the end
     try:
-        planned = None if on_screen else _planned(chat, user_text, source, called, run)
+        planned = None if tools is not None else _planned(chat, user_text, source, called, run)
         if planned is not None:  # a multi-step request, done as a plan (task_plan)
             answer = planned
             messages.append({"role": "assistant", "content": answer})
             return answer
-        content = _tool_loop(MODES[chat["mode"]], messages, MAX_TOOL_ROUNDS, called, run,
-                             [t for t in TOOLS if t["function"]["name"] in SCREEN_TOOLS] if on_screen else None)
+        content = _tool_loop(_mode_for(chat, tools), messages, MAX_TOOL_ROUNDS, called, run, tools)
         if content is None:
             return i18n.get(_language, "too_many_tool_calls")
         answer = content
@@ -765,12 +915,18 @@ def _send_message(chat, user_text, source="other"):
         if run["cost"]:
             _message_costs.append(run["cost"])
         router.log(route, source, called, time.monotonic() - started, answer)
+        # Shadow only too (tool_pick.py): what the NPU's decision model would have called first. For the messages
+        # the router logs (so UMAY_ROUTER=off, and a test that mocks the router, stop both) that had every tool.
+        if route is not None and tools is None and not MODES[chat["mode"]].get("picks"):  # not when it chooses for real
+            tool_pick.shadow(router.owner_text(user_text), source, called, TOOLS)
 
 
 def _tool_loop(mode, messages, rounds, called, run, tools=None):
     """Model turns and their tool calls until the model answers without one; returns that answer, or None when
     `rounds` ran out. `tools`: the tool schemas it may use (all by default); a call to any other is refused.
     Appends to `messages` and `called` in place and adds the cost to run["cost"]."""
+    if mode.get("picks"):
+        return _picked_loop(mode, messages, rounds, called, run, tools)
     allowed = None if tools is None else {t["function"]["name"] for t in tools}
     on_screen, nudges, compacted = False, 0, False
     for _ in range(rounds):
@@ -790,43 +946,207 @@ def _tool_loop(mode, messages, rounds, called, run, tools=None):
             return content
 
         messages.append({"role": "assistant", "content": content, "tool_calls": tool_calls})
-        images = []
-        names = {tc["function"]["name"] for tc in tool_calls}
-        on_screen = on_screen or bool(names & WORKING_TOOLS)
-        hud.activity("research" if names & RESEARCH_TOOLS else "work")
-        for tc in tool_calls:
-            fn_info = tc["function"]
-            credit_log.note_tool(fn_info["name"])
-            func = TOOL_FUNCTIONS.get(fn_info["name"])
-            try:
-                args = json.loads(fn_info.get("arguments") or "{}")
-                called.append((fn_info["name"], args))
-                leak = fn_info["name"] in OUTWARD_SEARCHES and memory_cortex.private_in(
-                    json.dumps(args, ensure_ascii=False), getattr(_memory, "owner_said", ""))
-                if allowed is not None and fn_info["name"] not in allowed:
-                    result = (f"{fn_info['name']} isn't one of this step's tools; use these: "
-                              f"{', '.join(sorted(allowed))}.")
-                elif leak:  # 2026-11-08: told "there is no such channel", it searched for the owner's own name
-                    result = "Not searched: that is the owner's private information, and it doesn't go to the web."
-                else:
-                    result = func(**args) if func else i18n.get(_language, "unknown_tool", name=fn_info["name"])
-            except Exception as e:
-                result = i18n.get(_language, "tool_error", error=e)
-            if fn_info["name"] in UNTRUSTED_TOOLS:
-                pc_tools.mark_untrusted()
-            memory_cortex.note_tool(fn_info["name"], result)  # a folder seen: its path goes on its neuron
-            if isinstance(result, dict) and ("image" in result or "images" in result):
-                images += result.get("images") or [result["image"]]
-                result = result["text"]
-            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": str(result)})
-        hud.activity("think")
+        on_screen = on_screen or bool({tc["function"]["name"] for tc in tool_calls} & WORKING_TOOLS)
+        images, _ = _run_calls(messages, tool_calls, called, allowed)
         if images:
-            _drop_images(messages)  # only the newest screenshot: a task with many clicks fills the context
-            messages.append({
-                "role": "user",
-                "content": [{"type": "text", "text": "[Screenshot taken by look_at_screen]"}]
-                + [{"type": "image_url", "image_url": {"url": url}} for url in images],
-            })
+            _show_images(messages, images)
+    return None
+
+
+def _run_calls(messages, tool_calls, called, allowed=None):
+    """Runs a model turn's tool calls and appends each answer to `messages` (and the call to `called`). Returns
+    (the images the tools returned, the answers' texts). A call to a tool outside `allowed` is refused."""
+    images, texts = [], []
+    names = {tc["function"]["name"] for tc in tool_calls}
+    hud.activity("research" if names & RESEARCH_TOOLS else "work")
+    for tc in tool_calls:
+        fn_info = tc["function"]
+        credit_log.note_tool(fn_info["name"])
+        func = TOOL_FUNCTIONS.get(fn_info["name"])
+        try:
+            args = json.loads(fn_info.get("arguments") or "{}")
+            called.append((fn_info["name"], args))
+            leak = fn_info["name"] in OUTWARD_SEARCHES and memory_cortex.private_in(
+                json.dumps(args, ensure_ascii=False), getattr(_memory, "owner_said", ""))
+            if allowed is not None and fn_info["name"] not in allowed:
+                result = (f"{fn_info['name']} isn't one of this step's tools; use these: "
+                          f"{', '.join(sorted(allowed))}.")
+            elif leak:  # 2026-11-08: told "there is no such channel", it searched for the owner's own name
+                result = "Not searched: that is the owner's private information, and it doesn't go to the web."
+            else:
+                result = func(**args) if func else i18n.get(_language, "unknown_tool", name=fn_info["name"])
+        except Exception as e:
+            result = i18n.get(_language, "tool_error", error=e)
+        if fn_info["name"] in UNTRUSTED_TOOLS:
+            pc_tools.mark_untrusted()
+        memory_cortex.note_tool(fn_info["name"], result)  # a folder seen: its path goes on its neuron
+        if isinstance(result, dict) and ("image" in result or "images" in result):
+            images += result.get("images") or [result["image"]]
+            result = result["text"]
+        texts.append(str(result))
+        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": str(result)})
+    hud.activity("think")
+    return images, texts
+
+
+def _show_images(messages, images):
+    """The tools' screenshots as one user message, the only one kept: a task with many clicks fills the context."""
+    _drop_images(messages)
+    messages.append({
+        "role": "user",
+        "content": [{"type": "text", "text": "[Screenshot taken by look_at_screen]"}]
+        + [{"type": "image_url", "image_url": {"url": url}} for url in images],
+    })
+
+
+# --- A picking mode's turn: the NPU's decision model names the tool, the model writes its arguments ------
+
+ARGS_SYSTEM = ("You fill in the arguments of one tool call for Umay, a desktop assistant on the owner's Windows PC. "
+               "The tool is already chosen. Answer with one JSON object: the arguments, taken from the owner's "
+               "message, the conversation and the results so far. Leave out an optional argument nothing speaks "
+               "about. Never make up a path, a name, an address or a time: use what is written, as it is written.")
+ARGS_TOKENS = 700        # write_file's text and a mail's body are arguments too
+ARGS_RESULT_CHARS = 1500  # of each earlier answer of the turn: the tab or the file the next call names is in it
+BEFORE_CHARS = 900
+# Nothing chose a tool (the NPU's server is down): the model must not act as if one had run.
+TOOLS_DOWN = ("\n(Your tools can't be reached right now. If this message asks you to do or look up something, say "
+              "you can't right now and that they should try again in a moment. Otherwise just answer.)")
+SEE_PROMPT = ("Read the image file {image}. It is a screenshot of the owner's PC. An assistant that can't see it has "
+              "to work from your words: say which app and window is in front, the text on it that matters, and the "
+              "buttons, fields, tabs and links by their labels, in at most 150 words of plain text. What the "
+              "assistant is doing: ")
+NOT_SEEN = "(The screenshot couldn't be put into words just now: you can't see the screen.)"
+
+
+def _before(messages, chars=BEFORE_CHARS):
+    """The last lines of the conversation in `messages`, in short ("Owner: ...", "Umay: ...")."""
+    lines = []
+    for m in messages[-6:]:
+        content = m.get("content")
+        if isinstance(content, str) and content and content != GO_ON and m["role"] in ("user", "assistant") \
+                and not content.startswith(SUMMARY_PREFIX):
+            lines.append(f"{'Owner' if m['role'] == 'user' else 'Umay'}: {' '.join(content.split())[:400]}")
+    return "\n".join(lines)[-chars:]
+
+
+def _arguments(mode, tool, request, before, done, run):
+    """The arguments for `tool`, written by the model as JSON under the tool's own schema (the server holds it
+    to it: 40 of 40 fitted for every model tried, 2026-11-11). `done`: this turn's calls so far. A tool that
+    takes nothing costs no request. Raises ValueError when the answer isn't a JSON object."""
+    fn = tool["function"]
+    schema = fn.get("parameters") or {}
+    properties = schema.get("properties") or {}
+    if not properties:
+        return {}
+    now = datetime.now()
+    parts = [f"Now: {now:%Y-%m-%d %H:%M} ({now:%A})."]
+    if before:
+        parts.append(f"The conversation before:\n{before}")
+    parts.append(f"The owner's message: {request}{getattr(_memory, 'note', '')}")
+    if done:
+        parts.append("Already done for it:\n" + "\n".join(
+            f"{n}. {name}({json.dumps(args, ensure_ascii=False)[:300]}) answered: {str(result)[:ARGS_RESULT_CHARS]}"
+            for n, (name, args, result) in enumerate(done, 1)))
+    parts.append(f"The tool to call now: {fn['name']}\nWhat it does: {fn.get('description', '')}\n"
+                 f"Its parameters: {json.dumps(schema, ensure_ascii=False)}")
+    body = {"model": mode["model"], "temperature": 0, "max_tokens": ARGS_TOKENS,
+            "messages": [{"role": "system", "content": ARGS_SYSTEM}, {"role": "user", "content": "\n\n".join(parts)}],
+            "response_format": {"type": "json_schema", "json_schema": {"name": "arguments", "schema": schema}},
+            **_request_extras(mode)}
+    response = _call_with_retry(lambda: _post(mode, body, timeout=60))
+    response.raise_for_status()
+    data = response.json()
+    credit_log.record(mode["model"], data.get("usage"))
+    run["cost"] += float((data.get("usage") or {}).get("cost") or 0)
+    text = data["choices"][0]["message"].get("content") or ""
+    try:
+        args = json.loads(text[text.index("{"):text.rindex("}") + 1])
+    except ValueError:
+        raise ValueError(f"no arguments in the answer: {text[:120]!r}") from None
+    if not isinstance(args, dict):
+        raise ValueError(f"the arguments aren't an object: {text[:120]!r}")
+    return {k: v for k, v in args.items() if k in properties}
+
+
+def _seen(images, request):
+    """A screenshot in words, for a model that takes no images (mode["sees"] is False): the heavy model reads
+    it. That is a cloud model: the request goes through heavy_model.scrub, the picture as it is (the owner's
+    rule for screenshots, 2026-11-08). NOT_SEEN when there is no heavy model or it fails."""
+    try:
+        head, _, data = str(images[-1]).partition(",")
+        picture = base64.b64decode(data) if head.startswith("data:") else None
+    except (ValueError, IndexError):
+        picture = None
+    said = heavy_model.ask(SEE_PROMPT + request[:300], "see", image=picture) if picture else None
+    return f"What the screenshot shows: {said.strip()}" if isinstance(said, str) and said.strip() else NOT_SEEN
+
+
+def _say(mode, messages, run, extra=""):
+    """The model's answer to the conversation as it stands, with no tool to call; appended to `messages`.
+    `extra` goes after the owner's message for this request only."""
+    kept = getattr(_memory, "note", "")
+    _memory.note = kept + extra
+    try:
+        content, _, cost = _request_fitting(mode, messages, [])
+        run["cost"] += cost
+        if not (content or "").strip() and _compact(mode, messages):  # a full context gives an empty answer
+            content, _, cost = _request_fitting(mode, messages, [])
+            run["cost"] += cost
+    finally:
+        _memory.note = kept
+    # A result note of its own making after the answer ('... on the desktop, dear.   [Result of search_file] No file
+    # named YouTube links found.', 2026-11-11): the model copies the notes' form. Only what stands before it is kept.
+    content = ASIDE.sub("", (content or "").split(RESULT_OPEN.split("{")[0])[0].rstrip() or content or "")
+    messages.append({"role": "assistant", "content": content})
+    return content
+
+
+def _picked_loop(mode, messages, rounds, called, run, tools=None):
+    """_tool_loop for a picking mode (UMAY_TOOL_CHOICE=npu). Each round the NPU's decision model names the next
+    tool from the owner's message and what the tools answered so far (tool_pick.choose), the model writes that
+    tool's arguments (_arguments) and the tool runs; when the choice is none, the model answers from the
+    conversation (_say). Measured 2026-11-10: d3:mini named the right first tool for 96% of the commands, the 4b
+    for 86%. The same call twice in a turn ends it, and so does anything that fails on the way: the model then
+    answers with what is there. Every choice is a line in tool_picks.jsonl."""
+    offered = TOOLS if tools is None else tools
+    by_name = {t["function"]["name"]: t for t in offered}
+    starts = _turn_starts(messages)
+    start = starts[-1] if starts else 0
+    request = messages[start]["content"] if starts else ""
+    said = router.owner_text(request) or request
+    before = _before(messages[:start])
+    done = []
+    for n in range(1, rounds + 1):
+        name, likely, args, error, repeat = None, None, None, "", False
+        began = time.monotonic()
+        if offered:
+            try:
+                name, likely, _ = tool_pick.choose(said, offered, done, before)
+            except Exception as e:  # the NPU's server is down or answered nonsense: no tool this round
+                error = f"{type(e).__name__}: {e}"[:160]
+        chose = time.monotonic()
+        if name:
+            try:
+                args = _arguments(mode, by_name[name], request, before, done, run)
+                repeat = any(d[0] == name and d[1] == args for d in done)
+            except Exception as e:
+                error = f"arguments: {type(e).__name__}: {e}"[:160]
+        tool_pick.note_pick(text=said[:300], round=n, tool=name, p=None if likely is None else round(float(likely), 3),
+                            seconds=round(chose - began, 2), args_seconds=round(time.monotonic() - chose, 2),
+                            **({"error": error} if error else {}), **({"repeat": True} if repeat else {}))
+        if args is None or repeat:
+            return _say(mode, messages, run, TOOLS_DOWN if error and not done else "")
+        call = {"id": f"call_{uuid.uuid4().hex[:12]}", "type": "function",
+                "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}}
+        messages.append({"role": "assistant", "content": "", "tool_calls": [call]})
+        images, texts = _run_calls(messages, [call], called)
+        result = texts[0]
+        if images and mode.get("sees", True) and not _on_npu(mode):
+            _show_images(messages, images)
+        elif images:
+            result += "\n" + _seen(images, said)
+            messages[-1]["content"] = result
+        done.append((name, args, result))
     return None
 
 
@@ -870,6 +1190,16 @@ def _what_was_done(messages):
     return "\n".join(lines[-16:])
 
 
+def _needs_plan(chat, user_text):
+    """task_plan.needs_plan. In a picking mode the NPU's decision model answers it, from the owner's own words:
+    of 65 requests the 4b had sent to the planner it called 18 a plan, and the others read as one step ("Okay."
+    with the spoken hint after it, "Could you open a QDA project?"); 1 of 45 single-tool commands (2026-11-11,
+    development/model_tests/run_plan_gate.py)."""
+    if MODES[chat["mode"]].get("picks") and npu.ready():
+        return task_plan.needs_plan(router.owner_text(user_text), ask_plain, decide=npu.decide)
+    return task_plan.needs_plan(user_text, ask_plain)
+
+
 def _planned(chat, user_text, source, called, run):
     """A multi-step request becomes a plan the heavy model writes and the local model does step by step (plan
     21; the owner's choice 2026-11-05: show the plan and start at once). Returns the answer, or None when
@@ -881,7 +1211,7 @@ def _planned(chat, user_text, source, called, run):
         return None
     if pending and not task_plan.NOT_A_REPLY.match(user_text.strip()):
         request = f"{pending}\n{task_plan.ANSWER_MARK} {user_text})"
-    elif task_plan.needs_plan(user_text, ask_plain):
+    elif _needs_plan(chat, user_text):
         request = user_text
     else:
         return None
@@ -1141,13 +1471,17 @@ def toggle_hud():
 
 
 def _toggle_mic():
+    """Ctrl+F3: the audio panel (hud_audio.py: stop / start listening, the microphone and the speakers, read again
+    at every press), or closes it. Without the HUD it is the old Ctrl+F3: she stops listening or listens again."""
     import voice_session
 
+    if hud.open_audio():
+        return
     hud.mic_muted(voice_session.toggle_mute())
 
 
 def toggle_mic():
-    """Ctrl+F3: she stops listening, or listens again; the HUD shows a muted microphone. Off the hotkey's thread."""
+    """Ctrl+F3 (_toggle_mic), off the hotkey's thread."""
     threading.Thread(target=_toggle_mic, daemon=True).start()
 
 
@@ -1162,6 +1496,37 @@ def open_disk_panel():
 def _hud_balances(_event):
     """The credits panel's OpenRouter and Tavily credit left."""
     hud.tell({"balances": {"openrouter": openrouter_balance(timeout=6), "tavily": list(_get_tavily_credits())}})
+
+
+def _hud_audio_state(event=None):
+    """The audio panel (Ctrl+F3) wants the devices: read again from Windows (a headset plugged in since), then
+    what is chosen, what the wake phrase is listened on and whether she is muted. The panel's every open asks."""
+    import wake
+
+    if (event or {}).get("scan"):
+        wake.reopen(refresh=True)
+    try:
+        found = audio_devices.listing()
+    except Exception as e:  # no sounddevice, PortAudio broken: the panel says so
+        found = {"inputs": [], "outputs": [], "default_input": None, "default_output": None,
+                 "error": f"{type(e).__name__}: {e}"}
+    hud.tell({"audio": {**found, **audio_devices.load(), "muted": voice.muted["on"], "listening": wake.status()}})
+
+
+def _hud_audio_set(event):
+    """A choice in the audio panel: {"input": name or ""} (the microphone: the wake listener opens on it now, a
+    recording from its next turn), {"output": name or ""} (her voice, from its next sentence), {"muted": bool}."""
+    import voice_session
+    import wake
+
+    if "muted" in event:
+        hud.mic_muted(voice_session.set_mute(bool(event["muted"])))
+    for kind in (audio_devices.INPUT, audio_devices.OUTPUT):
+        if kind in event:
+            audio_devices.choose(kind, str(event[kind] or "") or None)
+    if audio_devices.INPUT in event:
+        wake.reopen()
+    _hud_audio_state()
 
 
 def _hud_disk_state(_event=None):
@@ -1197,6 +1562,8 @@ def _hud_disk_delete(event):
 def wire_hud():
     """What the HUD's detail views can ask for, and the disk scan's progress pushed to them."""
     hud.on("balances", _hud_balances)
+    hud.on("audio_state", _hud_audio_state)
+    hud.on("audio_set", _hud_audio_set)
     hud.on("disk_state", _hud_disk_state)
     hud.on("disk_scan", _hud_disk_scan)
     hud.on("disk_delete", _hud_disk_delete)
@@ -1205,14 +1572,16 @@ def wire_hud():
 
 def ask_flash(prompt, what="", source="disk"):
     """One question to Umay's model with no tools and no history; returns
-    the answer's text. The disk scanner uses it for folders no rule knows (disk_memory.describe)."""
+    the answer's text. The disk scanner uses it for folders no rule knows (disk_memory.describe), companion.py to
+    rate news and word what she brings up. Never a reply: background work (_post), which lets the model rest
+    (2026-11-11: the news rating every 10 minutes kept the talker loaded all day)."""
     mode = MODES["umay"]
     if mode["key_env"] and not os.environ.get(mode["key_env"], "").strip():
         raise RuntimeError(f"{mode['key_env']} is not set")
 
     def request():
         response = _post(mode, {"model": mode["model"], "messages": [{"role": "user", "content": prompt}],
-                                **_request_extras(mode)}, timeout=90)
+                                **_request_extras(mode)}, timeout=90, background=True)
         response.raise_for_status()
         return response.json()
 
@@ -1224,7 +1593,7 @@ def ask_flash(prompt, what="", source="disk"):
 
 HOTKEY = "<ctrl>+<f1>"       # the text box
 HUD_HOTKEY = "<ctrl>+<f2>"   # hide / show the HUD
-MIC_HOTKEY = "<ctrl>+<f3>"   # stop / start listening
+MIC_HOTKEY = "<ctrl>+<f3>"   # the audio panel: stop / start listening, microphone, speakers
 
 
 def current_language():
@@ -1232,7 +1601,7 @@ def current_language():
 
 
 def start_ai_assistant():
-    """Starts the global hotkeys: Ctrl+F1 the text box, Ctrl+F2 hides / shows the HUD, Ctrl+F3 mutes her."""
+    """Starts the global hotkeys: Ctrl+F1 the text box, Ctrl+F2 hides / shows the HUD, Ctrl+F3 the audio panel."""
     if _state["listener"] is not None:
         return  # already running
     listener = keyboard.GlobalHotKeys({HOTKEY: toggle_chat_box, HUD_HOTKEY: toggle_hud, MIC_HOTKEY: toggle_mic})

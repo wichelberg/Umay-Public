@@ -12,13 +12,17 @@ Every CHECK_SECONDS (BATTERY_CHECK_SECONDS on battery) it reads the NVIDIA GPU (
   (default 7000) without the voice models: a loaded but idle model costs a game nothing but VRAM (see
   below), so a light game keeps it and replies stay quick; a heavier one gets all the VRAM. It is
   looked at on every reading of the game (a new level takes more), and a reply that loads it again
-  during a game is let finish first.
+  during a game is let finish first. When the NPU serves a chat model and the local model only talks
+  (UMAY_NPU_CHAT with UMAY_TOOL_CHOICE=npu), replies come from the NPU during a game (ai_assistant._on_npu)
+  and the local model is unloaded at once: the game gets all the VRAM.
 - ready: the GPU has been calm for a while (30 s after Umay starts, 2 minutes after a game),
   is cool, has room for the models, and the PC is on mains power. Whisper, the TTS (Piper on the
   CPU, or Chatterbox) and the local model are loaded ahead and kept loaded, so a reply starts fast;
   the voice pack loads when 🎤 is pressed (on the GPU only with UMAY_RVC_DEVICE=gpu or without the
   local model: RVC_GPU_MB). Only in this mode does wake.py listen for "Hey Umay" (it is
-  told through `listeners`, and closes the microphone at the first busy reading).
+  told through `listeners`, and closes the microphone at the first busy reading). After
+  UMAY_LOCAL_IDLE_MINUTES (5) without a reply (local_llm.dormant) it rests: nothing is loaded ahead, the
+  local model is unloaded (_rest) and the next reply loads it; wake.py still listens.
 - idle: on battery, or UMAY_VOICE_PRELOAD=off. Nothing is loaded ahead; models load when
   needed and unload after their idle time (a loaded model keeps a laptop's NVIDIA GPU awake).
 
@@ -37,6 +41,7 @@ from datetime import datetime
 import psutil
 
 import local_llm
+import npu
 import paths
 import voice
 
@@ -88,12 +93,13 @@ def _setting(name, default):
         return default
 
 
-def need_mb(tts_on_gpu=True, llm_local=False, llm_mb=0):
+def need_mb(tts_on_gpu=True, llm_local=False, llm_mb=0, stt=True):
     """VRAM the models loaded ahead take together. llm_mb: what the local model takes if it is loaded already:
     that, not NEED_MB's guess (2026-11-03 qwen3.5:4b took 3481 MB of the 4000 guessed, and those 519 MB kept
-    the voice from ever loading with Blender open)."""
+    the voice from ever loading with Blender open). stt=False: Whisper on the NPU hears (npu.asr_ready), so the
+    GPU's worker isn't loaded ahead and needs no room.""" 
     llm = (llm_mb or NEED_MB["llm"]) if llm_local else 0
-    return NEED_MB["stt"] + (NEED_MB["tts"] if tts_on_gpu else 0) + llm
+    return (NEED_MB["stt"] if stt else 0) + (NEED_MB["tts"] if tts_on_gpu else 0) + llm
 
 
 def llm_must_go(reading, voice_mb, limit=None):
@@ -224,26 +230,55 @@ def _log(text):
 def apply(mode, reading=None):
     """Puts the workers in line with `mode` (`reading`: the GPU reading it came from)."""
     voice.gaming["on"] = mode == "game"
-    keep = mode == "ready"
-    voice.local_stt.keep_loaded = voice.local_tts.keep_loaded = keep
+    asleep = mode == "ready" and local_llm.on() and local_llm.dormant()
+    keep = mode == "ready" and not asleep
+    voice.local_tts.keep_loaded = keep
+    voice.local_stt.keep_loaded = keep and not npu.asr_ready()  # only a stand-in while the NPU hears
+    _memory_model_away(mode, mode != "game" and local_llm.dormant())  # on battery (idle) too: resting is resting
     if mode == "game":  # the voice models at once, even one still loading: the game comes first
         voice_mb = _voice_mb()
         voice.local_tts.stop(at_once=True)
         voice.local_stt.stop(at_once=True)
         voice.voice_pack.stop(at_once=True)
         llm_mb = local_llm.vram_mb() if local_llm.on() else 0
-        if llm_mb and not local_llm.busy() and llm_must_go(reading, voice_mb):
+        moved = local_llm.picks() and npu.chat_ready()  # her replies come from the NPU's chat model in a game
+        if llm_mb and not local_llm.busy() and (moved or llm_must_go(reading, voice_mb)):
             local_llm.unload()
-            _log(f"game: VRAM still over the limit without the voice models: local model unloaded "
-                 f"({llm_mb:.0f} MB, {reading})")
+            _log(f"game: {'replies move to the NPU' if moved else 'VRAM still over the limit without the voice models'}"
+                 f": local model unloaded ({llm_mb:.0f} MB, {reading})")
     elif voice.voice_pack.stale():  # on the CPU after a full VRAM: it restarts on the GPU when needed
         voice.voice_pack.stop()
+    elif asleep:
+        _rest()
     elif mode == "ready":
-        for worker, on in ((voice.local_stt, voice.stt_on()), (voice.local_tts, voice.tts_on())):
+        for worker, on in ((voice.local_stt, voice.stt_on() and not npu.asr_ready()),
+                           (voice.local_tts, voice.tts_on())):
             if on and not worker.loaded() and not worker.busy():
                 _in_background(worker.start)
         if local_llm.on() and not local_llm.busy() and not local_llm.vram_mb():
             _load_llm()
+
+
+def _memory_model_away(mode, resting):
+    """The memory's own model (local_llm.memory_model) has the GPU only while she rests: the owner back (a reply
+    since) or a game, and it goes, once its request is done, so the talker or the game gets the VRAM."""
+    memory = local_llm.memory_model()
+    if not memory or resting or local_llm.busy():
+        return
+    memory_mb = local_llm.vram_mb(memory)
+    if memory_mb:
+        local_llm.unload(memory)
+        _log(f"{'game' if mode == 'game' else 'the owner is back'}: memory model unloaded ({memory_mb:.0f} MB)")
+
+
+def _rest():
+    """Nobody was answered for local_llm.idle_minutes(): nothing is loaded ahead (the voice workers unload after
+    their own idle time) and the local model goes now (~6 GB of VRAM and RAM). "Hey Umay" still works: the NPU
+    hears it. The next reply loads the model again; memory work that loads it lets it go again afterwards."""
+    llm_mb = local_llm.vram_mb()
+    if llm_mb and not local_llm.busy():
+        local_llm.unload()
+        _log(f"no reply for {local_llm.idle_minutes():g} min: local model unloaded ({llm_mb:.0f} MB)")
 
 
 def _in_background(load):
@@ -279,7 +314,9 @@ def _loop():
             reading = _make_room(_read_gpu())
             plugged = _plugged()
             llm_mb = local_llm.vram_mb() if local_llm.on() else 0
-            ours, need = _ours_mb(llm_mb), need_mb(voice.local_tts.on_gpu(), local_llm.on(), llm_mb)
+            memory = local_llm.memory_model()
+            ours = _ours_mb(llm_mb) + (local_llm.vram_mb(memory) if memory else 0)  # the memory's model is ours too
+            need = need_mb(voice.local_tts.on_gpu(), local_llm.on(), llm_mb, stt=not npu.asr_ready())
             mode = step(_state, reading, time.monotonic(), plugged, _ours_busy(), ours, preload, need)
             if mode != before:
                 _log(f"{before} -> {mode} ({reading})")

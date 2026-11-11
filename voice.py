@@ -26,6 +26,7 @@ import queue
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -38,8 +39,10 @@ import numpy as np
 import requests
 import soundfile as sf
 
+import audio_devices
 import credit_log
 import local_llm
+import npu
 import paths
 import tts_text
 
@@ -257,6 +260,20 @@ def _fix_heard(text):
     return text
 
 
+def _npu_heard(wav_bytes, prompt):
+    """The text Whisper on the NPU hears (npu.py), "" for silence; None when it isn't served there or fails:
+    then the worker on the GPU answers as before. UMAY_NPU_ASR=off: never asked. Nor while the NPU's chat model
+    is writing (npu.busy: memory work, a reply during a game): the clip would wait behind it for up to a minute."""
+    if not npu.asr_ready() or npu.busy():
+        return None
+    language = _env("UMAY_STT_LANGUAGE", "") or "en"
+    try:
+        return npu.transcribe(wav_bytes, prompt=prompt, language="" if language == "auto" else language)
+    except Exception as e:
+        print(f"Voice: Whisper on the NPU failed, the local worker hears it: {e}")
+        return None
+
+
 class LocalStt(_Worker):
     """speech_worker.py (Whisper) in voice_env."""
 
@@ -293,7 +310,11 @@ class LocalStt(_Worker):
 
     def transcribe(self, wav_bytes, prompt=None):
         """Text heard in wav_bytes, or None if voice_env or the model isn't set up. prompt: Whisper's prompt
-        (the wake listener's "Hey Umay."), else UMAY_STT_PROMPT."""
+        (the wake listener's "Hey Umay."), else UMAY_STT_PROMPT. Whisper on the NPU hears it when it is served
+        there (_npu_heard); this worker when the NPU isn't there or fails."""
+        heard = _npu_heard(wav_bytes, prompt or _env("UMAY_STT_PROMPT", ""))
+        if heard is not None:
+            return _fix_heard(heard)
         if not self.available():
             return None
         _audio_dir.mkdir(exist_ok=True)
@@ -442,6 +463,48 @@ gaming = {"on": False}
 muted = {"on": False}
 
 
+def hears():
+    """Speech can become text right now with nothing to load: Whisper on the NPU answers and its chat model
+    isn't writing (npu.busy: a clip would wait behind it), or the GPU's worker is loaded. Since 2026-11-11 that
+    worker is no longer loaded ahead while the NPU hears: with an 8B talking model (5.5 GB) its 1.3 GB filled the
+    card to voice_guard's limit, 46 MB short of never loading. UMAY_NPU_ASR=off: the worker as before."""
+    return local_stt.loaded() or (npu.asr_ready() and not npu.busy())
+
+
+def _stand_in():
+    """The NPU's chat model starts to write (npu.on_writing): the GPU's worker is loaded meanwhile, so "Hey Umay"
+    is heard during the memory's work. It unloads by itself after its idle time (voice_guard doesn't keep it).
+    Not while she rests (local_llm.dormant, the owner's RAM rule 2026-11-11): the memory works then, and 2.6 GB for
+    a "Hey Umay" that may come during one request's seconds isn't worth it."""
+    if (not (stt_on() and npu.asr_model()) or local_stt.loaded() or local_stt.busy() or _owner_away()
+            or local_llm.dormant()):
+        return
+
+    def load():
+        try:
+            local_stt.start()
+        except Exception as e:
+            print(f"Voice: the GPU's Whisper didn't load while the NPU writes: {e}")
+    threading.Thread(target=load, name="stt-stand-in", daemon=True).start()
+
+
+AWAY_SECONDS = 10 * 60   # no keyboard or mouse this long: nobody to say "Hey Umay", no stand-in worth 2.5 GB
+
+
+def _owner_away():
+    """Nobody has touched the PC for AWAY_SECONDS. The memory works mostly then (memory_cortex: its full pass runs
+    while the owner is away), and the stand-in loaded for it held 2.5 GB of RAM for nobody (2026-11-11, 14:00,
+    the owner out)."""
+    try:
+        import system_tools
+        return system_tools.idle_seconds() >= AWAY_SECONDS
+    except Exception:
+        return False
+
+
+npu.on_writing.append(_stand_in)
+
+
 def stt_on():
     return not gaming["on"] and _env("UMAY_STT", "").lower() != "openrouter" and local_stt.available()
 
@@ -549,8 +612,18 @@ class SilenceCut:
         return (self.spoke and self.quiet >= self.SILENCE) or (not self.spoke and self.seconds >= self.NO_SPEECH)
 
 
+_recording = {"open": 0}   # Recorders recording now: PortAudio's list isn't read again meanwhile (audio_idle)
+_recording_lock = threading.Lock()
+
+
+def audio_idle():
+    """No stream of ours but the wake listener's is open: nothing records, nothing plays, no call. Then
+    audio_devices.refresh may end PortAudio's streams (wake.reopen)."""
+    return _recording["open"] == 0 and not speaking() and not _output["device"]
+
+
 class Recorder:
-    """Records the default microphone until stop(). With on_silence, that is called once (from the
+    """Records the microphone the owner chose (audio_devices, the Ctrl+F3 panel; Windows' default otherwise) until stop(). With on_silence, that is called once (from the
     audio thread) when the speaker has finished: `cut` (SilenceCut) then says whether anyone spoke.
     floor and longest go to SilenceCut (voice_session.py)."""
 
@@ -570,8 +643,13 @@ class Recorder:
                 self._done = True
                 threading.Thread(target=self._on_silence, daemon=True).start()
 
-        self._stream = sounddevice.InputStream(samplerate=self.RATE, channels=1, dtype="float32", callback=callback)
+        device, _ = audio_devices.input_device(sounddevice)  # the microphone the owner chose (Ctrl+F3)
+        self._stream = sounddevice.InputStream(samplerate=self.RATE, channels=1, dtype="float32", callback=callback,
+                                               device=device)
         self._stream.start()
+        with _recording_lock:
+            _recording["open"] += 1
+        self._closed = False
 
     def level(self):
         """The microphone's loudness now, 0..1 (for glow.py)."""
@@ -581,6 +659,10 @@ class Recorder:
         """Stops recording and returns wav bytes (None if nothing was recorded)."""
         self._stream.stop()
         self._stream.close()
+        if not self._closed:
+            self._closed = True
+            with _recording_lock:
+                _recording["open"] -= 1
         if not self._chunks:
             return None
         out = io.BytesIO()
@@ -623,7 +705,7 @@ def warm_up():
     conversation calls this when it starts) so neither the transcript nor the first reply is slow."""
     def hear():
         try:
-            if stt_on():
+            if stt_on() and not npu.asr_ready():  # Whisper on the NPU hears: the GPU's worker only stands in
                 local_stt.start()
         except Exception as e:
             print(f"Voice: speech-to-text warm-up failed: {e}")
@@ -871,14 +953,15 @@ def _play_in_order(ready, turn):
             plays.append((time.monotonic(), seconds))
             _speech["until"] = plays[-1][0] + seconds
             _speech["envelope"] = (plays[-1][0], _envelope(path))
-            if _output["device"]:
+            device, name = _playing_on()
+            if device is not None:
                 import sounddevice
 
                 data, rate = sf.read(str(path), dtype="float32")
                 try:
-                    sounddevice.play(data, rate, device=_output_index(_output["device"]))
+                    sounddevice.play(data, rate, device=device)
                 except Exception as e:  # a thread's error goes nowhere: say it in speech.log
-                    _log_line(f"playing on {_output['device']} failed: {e!r}")
+                    _log_line(f"playing on {name} failed: {e!r}")
                     raise
             else:
                 winsound.PlaySound(str(path), winsound.SND_FILENAME | winsound.SND_ASYNC)
@@ -888,6 +971,19 @@ def _play_in_order(ready, turn):
                 time.sleep(0.05)
     finally:
         _log_speech(started, plays)
+
+
+def _playing_on():
+    """(device number, name) her voice plays on through sounddevice: a call's cable (calls.py) first, then the
+    speakers or headphones the owner chose (audio_devices, the Ctrl+F3 panel); (None, None) is Windows' default,
+    through winsound."""
+    if _output["device"]:
+        return _output_index(_output["device"]), _output["device"]
+    try:
+        return audio_devices.output_device()
+    except Exception as e:  # no sounddevice, a broken device list: the default speakers
+        _log_line(f"the chosen speakers: {e!r}")
+        return None, None
 
 
 def _log_line(text):
@@ -923,7 +1019,8 @@ def stop_playing():
         _speech["turn"] += 1
         _speech["until"] = 0.0
     winsound.PlaySound(None, 0)
-    if _output["device"]:
-        import sounddevice
-
-        sounddevice.stop()
+    if "sounddevice" in sys.modules:  # a call's cable or the speakers the owner chose
+        try:
+            sys.modules["sounddevice"].stop()
+        except Exception:
+            pass

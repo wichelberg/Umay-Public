@@ -755,7 +755,7 @@ class Scanner:
         except OSError:
             entries = []
         for e in entries:
-            if not (e.is_dir(follow_symlinks=False) and re.fullmatch(r"_MEI\d+", e.name, re.I)):
+            if not (e.is_dir(follow_symlinks=False) and re.fullmatch(r"_MEI[0-9a-f]+", e.name, re.I)):
                 continue
             if norm(e.path) == own:
                 self.add(Item("mei:own", "mei", self.t("disk_name_mei_own"), e.path, key="mei:own", opaque=True))

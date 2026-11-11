@@ -129,6 +129,7 @@ class View(QWidget):
     """What a detail view shows. `shared`: the HUD's data (weather, vitals, drives...), send() to Umay, log."""
 
     NAME, INDEX, TITLE = "", "", ""
+    SIZE = MAX_SIZE   # at most; a small view (hud_audio) asks for less
 
     def __init__(self, shared):
         super().__init__()
@@ -186,8 +187,8 @@ class Detail(QWidget):
         g = screen.availableGeometry()
         self.setGeometry(g)
         self.source = QRectF(source.translated(-g.topLeft()))
-        w = min(MAX_SIZE[0], g.width() - 2 * EDGE[0])
-        h = min(MAX_SIZE[1], g.height() - 2 * EDGE[1])
+        w = min(view.SIZE[0], MAX_SIZE[0], g.width() - 2 * EDGE[0])
+        h = min(view.SIZE[1], MAX_SIZE[1], g.height() - 2 * EDGE[1])
         self.target = QRectF((g.width() - w) / 2, (g.height() - h) / 2, w, h)
         self.t, self.closing = 0.0, False
         view.setParent(self)

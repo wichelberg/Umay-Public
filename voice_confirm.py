@@ -101,7 +101,7 @@ def ask(question):
                     return None
                 if wav is None:
                     continue
-                if not voice.local_stt.loaded():
+                if not voice.hears():
                     voice.local_stt.start()
                 answer = parse(voice.local_stt.transcribe(wav))
                 if answer is not None:

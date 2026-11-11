@@ -3,7 +3,8 @@ the API credit log. No Qt: each read_* returns a plain dict, and the HUD calls t
 
 - Weather: Open-Meteo (free, no key). The place is UMAY_WEATHER_LOCATION ("Istanbul", or "41.01,28.98"),
   else where this PC's IP address is; found once and cached by the HUD. Now, 48 hours and 7 days.
-- Vitals: psutil (CPU, RAM, network, uptime) and nvidia-smi (GPU); the local model's VRAM from Ollama.
+- Vitals: psutil (CPU, RAM, network, uptime) and nvidia-smi (GPU); the local model's VRAM from Ollama, the RAM
+  Umay's models hold (models_ram).
   The detail view adds each core, the programs using most CPU and memory, the GPU's power and clocks.
 - Drives: the fixed drives, and what Umay's models take on disk.
 - Alarms: config.json's events, the next time each rings (the rule check_event.py rings them by), and
@@ -176,6 +177,41 @@ def read_gpu():
             "temp": float(temp)}
 
 
+# Umay's model processes, for the RAM bar's own color (the owner, 2026-11-11). What each really holds: the working
+# set, except FastFlowLM's, whose NPU buffers are its own memory but not in its working set. Measured 2026-11-11:
+# Stheno on the GPU took +0.70 GB of used RAM (working set 0.70 GB, private 6.4 GB never touched); flm's working
+# set was 0.4 GB, its private memory 7.2 GB, and stopping its chat server freed 5.5 GB.
+MODEL_EXES = ("llama-server.exe", "flm.exe")
+PRIVATE_EXES = ("flm.exe",)
+WORKER_SCRIPT = "_worker.py"   # speech, tts, piper, voice (RVC), hands, face workers
+MODELS_SCAN_SECONDS = 15       # a full process scan; between scans only the known ones are read
+_models = {"pids": {}, "scanned": None}
+
+
+def models_ram():
+    """GB of RAM Umay's models hold now: Ollama's runners, FastFlowLM's servers and the voice/vision workers."""
+    now = time.monotonic()
+    if _models["scanned"] is None or now - _models["scanned"] > MODELS_SCAN_SECONDS:
+        pids = {}
+        for proc in psutil.process_iter(["name", "cmdline"]):
+            try:
+                name = (proc.info["name"] or "").lower()
+                if name in MODEL_EXES or (name.startswith("python")
+                                          and any(WORKER_SCRIPT in a for a in proc.info["cmdline"] or [])):
+                    pids[proc.pid] = name in PRIVATE_EXES
+            except (psutil.Error, TypeError):
+                continue
+        _models.update(pids=pids, scanned=now)
+    total = 0
+    for pid, private in list(_models["pids"].items()):
+        try:
+            info = psutil.Process(pid).memory_info()
+            total += getattr(info, "private", info.rss) if private else info.rss
+        except psutil.Error:
+            _models["pids"].pop(pid, None)
+    return total / 2 ** 30
+
+
 def read_vitals():
     mem = psutil.virtual_memory()
     net = psutil.net_io_counters()
@@ -187,6 +223,7 @@ def read_vitals():
     _net.update(at=now, recv=net.bytes_recv, sent=net.bytes_sent)
     return {
         "cpu": psutil.cpu_percent(interval=None), "ram_used": mem.used / 2 ** 30, "ram_total": mem.total / 2 ** 30,
+        "ram_models": models_ram(),
         "gpu": read_gpu(), "llm_vram": local_llm.vram_mb() / 1024 if local_llm.on() else 0.0,
         "down": down, "up": up, "uptime": time.time() - psutil.boot_time(),
     }
@@ -296,7 +333,10 @@ def read_drives():
                        "total": usage.total / 2 ** 30, "free": usage.free / 2 ** 30})
     drives.sort(key=lambda d: (d["name"] != system, d["name"]))
     local = Path(os.environ.get("LOCALAPPDATA") or Path.home())
-    umay = [("OLLAMA · " + local_llm.base_model().upper(), Path.home() / ".ollama" / "models"),
+    # "hf.co/bartowski/L3-8B-Stheno-v3.2-GGUF:Q4_K_M" -> "L3-8B-STHENO-V3.2": the panel's line is short
+    model = local_llm.base_model().rsplit("/", 1)[-1].split(":")[0] if "/" in local_llm.base_model() \
+        else local_llm.base_model()
+    umay = [("OLLAMA · " + model.upper().removesuffix("-GGUF"), Path.home() / ".ollama" / "models"),
             ("UMAY VOICE · WHISPER · PIPER · RVC", local / "Umay" / "voice")]
     return {"drives": drives, "umay": [{"name": n, "size": folder_size(p) / 2 ** 30} for n, p in umay if p.is_dir()]}
 

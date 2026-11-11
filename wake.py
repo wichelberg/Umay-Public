@@ -29,6 +29,7 @@ from datetime import datetime
 import numpy as np
 import soundfile as sf
 
+import audio_devices
 import eyes
 import paths
 import voice
@@ -252,6 +253,7 @@ class WakeListener:
         self._transcribe = transcribe or (lambda wav: voice.local_stt.transcribe(wav, prompt=wake_prompt()))
         self._stream = None
         self._wanted = False          # what voice_guard last asked for: where Ctrl+F3 goes back to
+        self.device = ""              # the microphone the stream is open on (audio_devices.input_device)
         self._lock = threading.Lock()
         self._bits = queue.Queue(maxsize=2)  # more than that: drop, Whisper is still busy
         self._segmenter = Segmenter()
@@ -282,14 +284,29 @@ class WakeListener:
 
                 self._segmenter = Segmenter()
                 self._last_audio = time.monotonic()
+                device, self.device = audio_devices.input_device(sounddevice)  # the owner's choice (Ctrl+F3)
                 stream = sounddevice.InputStream(samplerate=RATE, channels=1, dtype="float32", blocksize=BLOCK,
-                                                 callback=self._on_audio)
+                                                 callback=self._on_audio, device=device)
                 stream.start()
                 self._stream = stream
-                _log("listening")
+                _log(f"listening on {self.device}")
             elif not on and self._stream is not None:
                 self._close()
                 _log("off (muted)" if voice.muted["on"] else "off (battery, a game, or not ready)")
+
+    def reopen(self, refresh=False):
+        """The stream closes and opens again, on the microphone chosen now. refresh: PortAudio reads its device
+        list again first (a headset plugged in since Umay started), only when nothing else of ours records or
+        plays (voice.audio_idle): it ends every stream."""
+        with self._lock:
+            if self._stream is not None:
+                self._close()
+            if refresh and voice.audio_idle():
+                try:
+                    audio_devices.refresh()
+                except Exception as e:
+                    _log(f"reading the devices again failed: {type(e).__name__}: {e}")
+        self.set_enabled(self._wanted)
 
     def _close(self):
         stream, self._stream = self._stream, None
@@ -324,7 +341,7 @@ class WakeListener:
             # only the model voice_guard keeps loaded: never load it (or anything paid) for this
             if not self.enabled() or self._busy():
                 continue
-            if not (voice.stt_on() and voice.local_stt.loaded()):
+            if not (voice.stt_on() and voice.hears()):
                 _log(f"{len(bit) / RATE:.1f} s bit skipped: the local Whisper isn't loaded")
                 continue
             started = time.monotonic()
@@ -365,6 +382,26 @@ def mute_changed():
     it = _listener["it"]
     if it is not None:
         it.set_enabled(it._wanted)
+
+
+def reopen(refresh=False):
+    """The Ctrl+F3 panel: the device list read again (refresh) and the wake listener's microphone opened on the
+    owner's choice. Without a listener only the list is read again, when nothing of ours records or plays."""
+    it = _listener["it"]
+    if it is not None:
+        it.reopen(refresh)
+    elif refresh and voice.audio_idle():
+        audio_devices.refresh()
+
+
+def status():
+    """For the Ctrl+F3 panel: {"on": the wake phrase is listened for now, "device": on which microphone,
+    "why": why not ("muted" | "off": UMAY_WAKE=off | "waiting": battery, a game, or the voice not ready)}."""
+    it = _listener["it"]
+    if it is not None and it.enabled():
+        return {"on": True, "device": it.device, "why": ""}
+    why = "muted" if voice.muted["on"] else ("off" if not _setting_on() else "waiting")
+    return {"on": False, "device": "", "why": why}
 
 
 def start(on_wake, paused=lambda: False, on_eyes=None):

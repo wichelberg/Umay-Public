@@ -30,12 +30,17 @@ to Telegram with Done / Not yet buttons; no answer in PLAN_CALL_AFTER_MINUTES (6
 call about it (not in the quiet hours, at most CALLS_A_DAY["plan"]).
 
 What she says is her model's own words (ai_assistant.ask_flash with her persona; the local model is free), made
-from plain facts; if the model can't answer, the facts themselves. News is rated by the same model, in batches.
+from plain facts; if the model can't answer, the facts themselves. News is judged by the NPU's decision model
+headline by headline (NEWS_ASK, UMAY_NEWS_GATE; a call from UMAY_NEWS_CALL_GATE), or without an NPU rated by her
+model in batches (UMAY_NEWS_SCORE). When set, stories at the PC come UMAY_NEWS_GAP_MINUTES apart (urgent ones too)
+and at most UMAY_NEWS_PER_DAY a day; both 0 by default (the owner, 2026-11-11: a strict gate is enough).
 Nothing here starts while a game runs except what is urgent.
 
 Logs: %LOCALAPPDATA%\\Umay\\companion.log (every decision); state (what was told, the day's greeting) in
 companion.json beside it. .env: UMAY_COMPANION (on; off = none of this), UMAY_AWAY_MINUTES, UMAY_QUIET_HOURS,
-UMAY_NOISY_LEVEL, UMAY_NEWS_SCORE, UMAY_NEWS_CALL_SCORE, UMAY_BREAK_MINUTES, UMAY_MIC_OK, UMAY_PLAN_CHECK_HOURS.
+UMAY_NOISY_LEVEL, UMAY_NEWS_SCORE, UMAY_NEWS_CALL_SCORE, UMAY_NEWS_GATE, UMAY_NEWS_CALL_GATE, UMAY_NEWS_PER_DAY,
+UMAY_NEWS_GAP_MINUTES, UMAY_BREAK_MINUTES,
+UMAY_MIC_OK, UMAY_PLAN_CHECK_HOURS.
 """
 import json
 import os
@@ -54,7 +59,6 @@ NEWS_MINUTES = 10
 MARKETS_MINUTES = 5
 WEATHER_MINUTES = 20
 GAP_MINUTES = 4            # between two things she brings up herself (urgent ones don't wait)
-NEWS_GAP_MINUTES = 20      # between two news stories
 NEWS_BATCH = 15            # new headlines rated at once (the newest)
 CHAT_WAIT_MINUTES = 20     # small talk that couldn't be said in this long is dropped
 MORNING_FROM, MORNING_UNTIL = 5, 22   # the day's opening (greeting + "what will we do today?")
@@ -80,8 +84,20 @@ MOVES = {"index": 2.0, "fx": 1.5, "stock": 5.0, "crypto": 5.0, "commodity": 2.5}
 CRASH_STEPS = 3
 CALLS_A_DAY = {"news": 2, "markets": 2, "plan": 2}
 DEFAULTS = {"UMAY_AWAY_MINUTES": "5", "UMAY_QUIET_HOURS": "23-08", "UMAY_NOISY_LEVEL": "0.004",
-            "UMAY_NEWS_SCORE": "9", "UMAY_NEWS_CALL_SCORE": "10", "UMAY_BREAK_MINUTES": "120",
+            "UMAY_NEWS_SCORE": "9", "UMAY_NEWS_CALL_SCORE": "10", "UMAY_NEWS_GATE": "0.85", "UMAY_NEWS_CALL_GATE": "0.95",
+            "UMAY_NEWS_PER_DAY": "0", "UMAY_NEWS_GAP_MINUTES": "0",
+            "UMAY_BREAK_MINUTES": "120",
             "UMAY_MIC_OK": "discord", "UMAY_PLAN_CHECK_HOURS": "3"}
+# What the NPU's decision model is asked about each headline (deps["interrupt"] -> P(yes); _ranked).
+# 2026-11-11, the owner: she started 14 talks a day for routine news (an IPO range, a CEO's "vision", quarterly
+# revenue), all rated 9-10 by the talker. On two days' headlines this question gave real disasters, a war, a CEO
+# leaving, a crash 0.87-0.99 and those 0.2-0.76. With no daily cap and no gap (the owner's choice), UMAY_NEWS_GATE
+# 0.85 passed 2 of a day's 381 headlines (a vice-president resigning 0.96, an Iran war update 0.89); 0.9 passed 1,
+# 0.8 passed 6. Routine company news (OpenAI's revenue, a call for Nvidia's CEO to go) stayed at 0.76-0.79.
+NEWS_ASK = ("The state is a news headline. The owner is working at the PC and their assistant can interrupt them to "
+            "say it. Is this rare, historic or truly big news worth interrupting them right now (a disaster, a war, a "
+            "market crash, a leader resigning, a major product launch by a company they follow), not routine "
+            "business news, a report, an opinion or a forecast?")
 LEVELS = ("chat", "notable", "important", "urgent")
 OURS_ON_MIC = ("umay",)  # the wake listener is her own microphone use (her calls make her busy anyway)
 MIC_KEY = r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone"
@@ -112,6 +128,11 @@ def _log(text):
 
 
 # --- pure rules (tests/test_companion.py) -------------------------------------------------------------------
+
+def headline(item):
+    """A news item as one line: what she's told, and what the decision model judges."""
+    return f"News about {' and '.join(item['tags'][:2])}: {item['title']} ({item['source']} reports)"
+
 
 def quiet_hours(hour, spec):
     """True in the quiet hours "23-08" (wrapping past midnight) or "13-14"; a bad spec: never."""
@@ -301,6 +322,7 @@ class Companion:
         data.setdefault("calls", [])  # the days of news calls
         data.setdefault("market_calls", [])
         data.setdefault("flags", {})
+        data.setdefault("news_told", [])  # one date per story told at the PC (UMAY_NEWS_PER_DAY)
         return data
 
     def _save(self):
@@ -550,6 +572,50 @@ class Companion:
         if first_run or not new:
             return  # the first read only learns what is already out
         new = sorted(new, key=lambda i: -i["at"])[:NEWS_BATCH]
+        good = self._ranked(new, data)
+        if not good:
+            return
+        # 0, the default: no wait between two stories, the gate alone decides (the owner, 2026-11-11)
+        in_gap = time.time() - self.last_news_said < _setting("UMAY_NEWS_GAP_MINUTES") * 60
+        today = date.today().isoformat()
+        told = [d for d in self.store["news_told"] if d == today]
+        if s["away"]:  # Telegram or a call: the gap only, and a call-worthy one doesn't wait
+            if in_gap and not good[0][2]:
+                return
+        else:  # at the PC every story is an interruption: the gap for all, and a cap a day
+            per_day = int(_setting("UMAY_NEWS_PER_DAY"))  # 0: no cap, the gate alone (the owner, 2026-11-11)
+            left = per_day - len(told) if per_day > 0 else len(good)
+            if in_gap or left <= 0:
+                _log(f"news not told: {'too soon after the last' if in_gap else f'{len(told)} told today'}: "
+                     + "; ".join(i["title"][:60] for _, i, _ in good))
+                return
+            good = good[:left]
+            self.store["news_told"] = told + [today] * len(good)
+            self._save()
+        self.last_news_said = time.time()
+        for _, item, call_worthy in good:
+            # Only news about whom the owner follows can be a call: the model gave a 10 to a day's war news in the
+            # WORLD section and she called (2026-11-03).
+            urgent = call_worthy and item["kind"] == "watch"
+            self.tell(headline(item), "urgent" if urgent else "important", "news")
+
+    def _ranked(self, new, data):
+        """[(strength, item, call-worthy)] worth telling, best first, at most 2. With deps["interrupt"] (the NPU's
+        decision model, ~0.7 s a headline) it alone judges each one: P(yes) >= UMAY_NEWS_GATE, a call from
+        UMAY_NEWS_CALL_GATE; the talker isn't asked, so it can rest (local_llm.dormant). The check failing: none
+        this round. Without the check the talker rates the batch 1-10 (UMAY_NEWS_SCORE, UMAY_NEWS_CALL_SCORE)."""
+        gate = self.d.get("interrupt")
+        if gate is not None:
+            checked = []
+            for item in new:
+                try:
+                    checked.append((gate(headline(item)), item))
+                except Exception as e:
+                    _log(f"news: the check failed ({e!r})")
+                    return []
+            _log("news checked: " + ", ".join(f"{p:.2f} {i['title'][:60]}" for p, i in checked))
+            return sorted(((p, i, p >= _setting("UMAY_NEWS_CALL_GATE")) for p, i in checked
+                           if p >= _setting("UMAY_NEWS_GATE")), key=lambda x: -x[0])[:2]
         listing = "\n".join(f"{n}. [{', '.join(i['tags'])}] {i['title']} ({i['source']})"
                             for n, i in enumerate(new, 1))
         prompt = (
@@ -566,20 +632,10 @@ class Companion:
             scores = parse_scores(self.d["ask"](prompt), len(new))
         except Exception as e:
             _log(f"news: rating failed ({e!r})")
-            return
+            return []
         _log("news rated: " + ", ".join(f"{scores.get(n, '?')} {i['title'][:60]}" for n, i in enumerate(new, 1)))
-        good = sorted(((scores[n], i) for n, i in enumerate(new, 1)
+        return sorted(((scores[n], i, scores[n] >= _setting("UMAY_NEWS_CALL_SCORE")) for n, i in enumerate(new, 1)
                        if scores.get(n, 0) >= _setting("UMAY_NEWS_SCORE")), key=lambda x: -x[0])[:2]
-        if not good or (time.time() - self.last_news_said < NEWS_GAP_MINUTES * 60
-                        and good[0][0] < _setting("UMAY_NEWS_CALL_SCORE")):
-            return
-        self.last_news_said = time.time()
-        for score, item in good:
-            # Only news about whom the owner follows can be a call: the model gave a 10 to a day's war news in the
-            # WORLD section and she called (2026-11-03).
-            urgent = score >= _setting("UMAY_NEWS_CALL_SCORE") and item["kind"] == "watch"
-            self.tell(f"News about {' and '.join(item['tags'][:2])}: {item['title']} ({item['source']} reports)",
-                      "urgent" if urgent else "important", "news")
 
     def _markets(self):
         data = self.d["markets"]()

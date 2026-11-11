@@ -65,6 +65,22 @@ def bar(p, x, y, w, frac, col=C["cyan"], h=4):
     p.fillRect(QRectF(x, y, w * max(0.0, min(1.0, frac)), h), QColor(col))
 
 
+def split_bar(p, x, y, w, total, parts, h=4):
+    """A bar of `total` with parts side by side [(amount, color, alpha, legend)], each legend under it with its
+    color's square (the vitals panel: Umay's share of the RAM and the VRAM)."""
+    p.fillRect(QRectF(x, y, w, h), color(C["cyan"], 0.12))
+    at = x
+    for amount, col, alpha, _ in parts:
+        seg = w * max(0.0, amount) / total if total else 0
+        p.fillRect(QRectF(at, y, min(seg, x + w - at), h), color(col, alpha))
+        at += seg + (2 if seg else 0)
+    f = font(11, 400, mono=True)
+    at = x
+    for _, col, alpha, legend in parts:
+        text(p, at, y + 26, "■", f, color(col, min(1.0, alpha + 0.15)))
+        at += 14 + text(p, at + 14, y + 26, legend, f, C["muted"]) + 18
+
+
 def rule(p, x, y, w):
     g = QLinearGradient(x, y, x + w, y)
     g.setColorAt(0, color(C["cyan"], 0.35))

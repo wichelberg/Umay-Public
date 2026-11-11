@@ -50,6 +50,13 @@ CLASSIFY_PROMPT = (
     "then search the web, then write a summary). Answer SIMPLE if one action or one tool call does it (open an "
     "app, play a song, a question, set an alarm, check the weather, search one thing). Answer with one word: "
     "PLAN or SIMPLE.\n\nRequest: ")
+# The same question as a choice, for the NPU's decision model (needs_plan's `decide`).
+CLASSIFY_ASK = "The state is a request to a PC assistant. Choose whether doing it needs a step-by-step plan."
+CLASSIFY_CHOICES = {
+    "PLAN": "Doing it takes several different actions in a row: open a site, find a page, download a file; or read "
+            "a file, then search the web, then write a summary.",
+    "SIMPLE": "One action or one tool call does it (open an app, play a song, set an alarm, check the weather, "
+              "search one thing), or it is a question or only talk."}
 
 # Group mates come along with a step's tools (21b), so a step that has to fall back (web_act -> click) can.
 GROUPS = [
@@ -156,10 +163,20 @@ What the tools did:
 FAILED = re.compile(r"\b(couldn['’]?t|could not|can['’]?t|cannot|unable|wasn['’]?t able|failed)\b", re.IGNORECASE)
 
 
-def needs_plan(text, ask_local):
-    """True when the request takes several actions in a row. ask_local(prompt) -> the 4b's answer."""
+def needs_plan(text, ask_local, decide=None):
+    """True when the request takes several actions in a row. ask_local(prompt) -> the local model's answer.
+    `decide`: npu.decide, when the NPU's decision model is the one that chooses (a picking mode, whose local model
+    is a talker): it is asked first, the local model only when it fails."""
     if len(text.split()) < MIN_WORDS:
         return False
+    if decide is not None:
+        try:
+            choice = decide(text, {"plan": {"type": "choice", "instructions": CLASSIFY_ASK,
+                                            "criteria": CLASSIFY_CHOICES}})["plan"]["choice"]
+            if choice in CLASSIFY_CHOICES:
+                return choice == "PLAN"
+        except Exception:
+            pass
     try:
         return ask_local(CLASSIFY_PROMPT + text).strip().upper().startswith("PLAN")
     except Exception:  # the local model is down: no plan, the normal tool loop answers
