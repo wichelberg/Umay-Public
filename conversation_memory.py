@@ -23,6 +23,7 @@ from pathlib import Path
 
 import requests
 
+import llama_server
 import local_llm
 import npu
 import paths
@@ -227,7 +228,10 @@ def ask_local(prompt):
     """One question to the local model (Ollama), no tools; counts as Umay's own GPU work meanwhile. The NPU's
     chat model answers instead when one is set and up (UMAY_NPU_CHAT, like memory_cortex.ask_json): judging and
     summing up a conversation is reading work, not the talking model's. Before both: the memory's own model on the GPU
-    when one is set (local_llm.memory_model)."""
+    when one is set (local_llm.memory_model). First of all, with UMAY_LOCAL_BACKEND=llamacpp: the one big model."""
+    if local_llm.llama():
+        with local_llm.working(background=True):
+            return llama_server.ask_text(prompt, temperature=0)
     model = local_llm.memory_model()
     if model:
         with local_llm.working(background=True):

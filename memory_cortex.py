@@ -50,6 +50,7 @@ import numpy as np
 import requests
 
 import cortex_graph
+import llama_server
 import local_llm
 import npu
 import paths
@@ -645,7 +646,11 @@ def ask_json(prompt, schema, timeout=300):
     tries again later: a late fact is better than a wrong one. Otherwise the local model answers (Ollama
     structured output: the 4b can't break it). Before both: the memory's own model on the GPU when one is set
     (local_llm.memory_model, the owner's plan 2026-11-11: it takes the VRAM while she rests, nothing of the RAM);
-    failing, this raises too and the learner tries again later."""
+    failing, this raises too and the learner tries again later. First of all, with UMAY_LOCAL_BACKEND=llamacpp: the
+    one big model (llama_server) answers, the schema enforced by the server; in a game it raises (it stays off)."""
+    if local_llm.llama():
+        with local_llm.working(background=True):
+            return llama_server.ask_json(prompt, schema, timeout=timeout)
     memory = local_llm.memory_model()
     if memory:
         with local_llm.working(background=True):

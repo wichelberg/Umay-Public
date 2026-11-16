@@ -25,7 +25,9 @@ import psutil
 
 import alert
 import i18n
+import llama_server
 import paths
+import pressure
 import system_tools
 import telegram_listener
 
@@ -77,7 +79,10 @@ def _read_gpu_temp():
 
 
 def _read_ram():
-    return psutil.virtual_memory().percent, {}
+    """RAM in use, the big local model's mapped file pages left out (llama_server.reclaimable_bytes)."""
+    memory = psutil.virtual_memory()
+    used = max(0, memory.total - memory.available - llama_server.reclaimable_bytes())
+    return 100 * used / memory.total, {}
 
 
 def _read_cpu():
@@ -143,6 +148,8 @@ def _ram_usage_by_pid():
     usage = {}
     for p in psutil.process_iter():
         try:
+            if "llama-server" in p.name().lower():   # Umay's own model: not for her to end
+                continue
             usage[p.pid] = p.memory_info().rss
         except psutil.Error:
             pass
@@ -198,7 +205,9 @@ def _checks():
 
 
 def start():
-    """Starts the monitor in the background (unless UMAY_HEALTH=off)."""
+    """Starts the monitor in the background (unless UMAY_HEALTH=off). The memory-pressure log (pressure.py) starts with
+    it, whatever UMAY_HEALTH says: it only reads (UMAY_PRESSURE_LOG=off stops it)."""
+    pressure.start()
     if os.environ.get("UMAY_HEALTH", "").strip().lower() in ("off", "0", "false", "no"):
         return
     ensure_running()

@@ -519,10 +519,17 @@ LANGUAGE_RULE = "Reply in English only, even when the user writes in another lan
 LANGUAGE_REMINDER = "\n\n(Reply in English.)"
 
 
-def _system_prompt(mode):
+def _clock():
     now = datetime.now()
-    clock = f"Current local date and time: {now:%Y-%m-%d %H:%M} ({now:%A})."
-    return f"{mode['system']}\n\n{clock}\n{LANGUAGE_RULE}" if mode["system"] else f"{clock}\n{LANGUAGE_RULE}"
+    return f"Current local date and time: {now:%Y-%m-%d %H:%M} ({now:%A})."
+
+
+def _system_prompt(mode):
+    """The persona and rules. A local model gets the clock with the latest user text instead (_with_reminder): in the
+    system prompt it changes every minute and the server's prompt cache is lost from there on, so the whole
+    ~2,500-token request was read again (the 35B: 60-125 tokens/s, 20-24 s a turn, 2026-11-16)."""
+    clock = "" if mode["local"] else _clock() + "\n"
+    return f"{mode['system']}\n\n{clock}{LANGUAGE_RULE}" if mode["system"] else f"{clock}{LANGUAGE_RULE}"
 
 
 def _tools(mode, tools=None):
@@ -564,9 +571,11 @@ def _post(mode, body, timeout, background=False):
 
 def _with_reminder(mode, messages):
     """messages for the request: the latest user text gets this request's memories (memory_cortex, never kept
-    in the history) and, for the local model, LANGUAGE_REMINDER, which stays last."""
-    extra = getattr(_memory, "note", "") + (
-        (PICKED_REMINDER if mode.get("picks") else LANGUAGE_REMINDER) if mode["local"] else "")
+    in the history), for the local model the clock (not in its system prompt: see _system_prompt) and
+    LANGUAGE_REMINDER, which stays last."""
+    clock = f"\n\n({_clock()})" if mode["local"] else ""
+    reminder = (PICKED_REMINDER if mode.get("picks") else LANGUAGE_REMINDER) if mode["local"] else ""
+    extra = clock + getattr(_memory, "note", "") + reminder
     if not extra:
         return messages
     last = max((i for i, m in enumerate(messages) if m["role"] == "user" and isinstance(m.get("content"), str)),
@@ -1039,8 +1048,8 @@ def _arguments(mode, tool, request, before, done, run):
     if not properties:
         return {}
     now = datetime.now()
-    parts = [f"Now: {now:%Y-%m-%d %H:%M} ({now:%A})."]
-    if before:
+    parts = []   # what stays the same from one request to the next first, the clock last: the server's prompt cache
+    if before:   # holds only a prefix that doesn't change (the 35B reads 60-125 tokens/s)
         parts.append(f"The conversation before:\n{before}")
     parts.append(f"The owner's message: {request}{getattr(_memory, 'note', '')}")
     if done:
@@ -1049,6 +1058,7 @@ def _arguments(mode, tool, request, before, done, run):
             for n, (name, args, result) in enumerate(done, 1)))
     parts.append(f"The tool to call now: {fn['name']}\nWhat it does: {fn.get('description', '')}\n"
                  f"Its parameters: {json.dumps(schema, ensure_ascii=False)}")
+    parts.append(f"Now: {now:%Y-%m-%d %H:%M} ({now:%A}).")
     body = {"model": mode["model"], "temperature": 0, "max_tokens": ARGS_TOKENS,
             "messages": [{"role": "system", "content": ARGS_SYSTEM}, {"role": "user", "content": "\n\n".join(parts)}],
             "response_format": {"type": "json_schema", "json_schema": {"name": "arguments", "schema": schema}},

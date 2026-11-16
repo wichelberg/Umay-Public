@@ -14,6 +14,8 @@ in ~0.6 s and a reply after a tool in ~0.4-0.9 s.
 UMAY_TOOL_CHOICE (npu: picks()), UMAY_LOCAL_VISION (off: sees()), UMAY_LOCAL_TEMPLATE (llama3: TEMPLATES),
 UMAY_LOCAL_IDLE_MINUTES (5; dormant(): unloaded after that long without a reply, 0 = kept),
 UMAY_MEMORY_MODEL (memory_model(): the memory's own model on the GPU while she rests).
+UMAY_LOCAL_BACKEND=llamacpp (llama()): the model is one big MoE model in a llama-server process of Umay's own
+(llama_server.py, its UMAY_LLAMA_* settings) instead of Ollama's; Ollama stays for the embeddings.
 """
 import contextlib
 import os
@@ -21,6 +23,8 @@ import threading
 import time
 
 import requests
+
+import llama_server
 
 # Not "localhost": on Windows that tries IPv6 (::1) first, where Ollama doesn't listen, and every
 # request then waits ~2 s before falling back to IPv4 (measured: 2.4 s vs 0.4 s for the same reply).
@@ -43,6 +47,17 @@ def on():
     return _env("UMAY_LLM", "local").lower() != "openrouter"
 
 
+def llama():
+    """UMAY_LOCAL_BACKEND=llamacpp (the owner's choice 2026-11-16): the local model is one big model in a llama-server
+    process of Umay's own (llama_server.py) instead of Ollama's talker + memory model. Only when its files exist: a
+    wrong path falls back to Ollama and says so in the log."""
+    return on() and _env("UMAY_LOCAL_BACKEND", "ollama").lower() == "llamacpp" and llama_server.available()
+
+
+if llama():   # ai_assistant reads CHAT_URL when it is imported
+    CHAT_URL = llama_server.chat_url()
+
+
 def picks():
     """UMAY_TOOL_CHOICE=npu: the NPU's decision model names each tool (tool_pick.choose) and this model only writes
     the tool's arguments and speaks (ai_assistant._picked_loop). So it needs no tool calling of its own: a
@@ -61,10 +76,14 @@ def base_model():
 
 
 def context():
+    if llama():
+        return llama_server.context()
     return int(_env("UMAY_LOCAL_CONTEXT", "16384"))
 
 
 def model():
+    if llama():
+        return llama_server.SERVED_NAME
     return _env("UMAY_LOCAL_MODEL", "umay-" + base_model().replace(":", "-"))
 
 
@@ -93,7 +112,11 @@ def _creation():
 
 def ensure_model():
     """Makes model() from base_model() with a context() window if Ollama doesn't have it yet. Raises
-    requests' ConnectionError when Ollama isn't running, HTTPError when the base model isn't pulled."""
+    requests' ConnectionError when Ollama isn't running, HTTPError when the base model isn't pulled. With the
+    llama-server backend: starts that server if it isn't up (ConnectionError in a game, or when it won't start)."""
+    if llama():
+        llama_server.ensure()
+        return
     name = model()
     if _made["model"] == name:
         return
@@ -164,12 +187,16 @@ def memory_model():
     conversation_memory.ask_local). The owner's plan, 2026-11-11: in use, the talker has the VRAM; while she rests
     (quiet: when the memory works) the talker goes and the model best at the memory takes the GPU instead, so
     nothing of it sits in RAM (the NPU's chat server took 5.4 GB of RAM for it). voice_guard lets it go when the
-    owner is back or a game starts. Empty: the NPU's chat model (UMAY_NPU_CHAT) or the talker, as before."""
-    return _env("UMAY_MEMORY_MODEL", "")
+    owner is back or a game starts. Empty: the NPU's chat model (UMAY_NPU_CHAT) or the talker, as before. With the
+    llama-server backend it is always empty: the one big model does the memory's text work too."""
+    return "" if llama() else _env("UMAY_MEMORY_MODEL", "")
 
 
 def vram_mb(name=None):
-    """VRAM a loaded model takes, model() unless named (0 when it isn't loaded or Ollama doesn't answer)."""
+    """VRAM a loaded model takes, model() unless named (0 when it isn't loaded or Ollama doesn't answer). The
+    llama-server's is what the card gained when it came up (llama_server.vram_mb)."""
+    if llama():
+        return llama_server.vram_mb() if name in (None, model()) else 0
     try:
         loaded = requests.get(f"{BASE_URL}/api/ps", timeout=2).json().get("models", [])
     except (requests.RequestException, ValueError):
@@ -181,12 +208,19 @@ def vram_mb(name=None):
 def load():
     """Loads the model and keeps it KEEP_ALIVE (a reply resets that to Ollama's default, 5 minutes)."""
     ensure_model()
+    if llama():
+        return
     requests.post(f"{BASE_URL}/api/generate", json={"model": model(), "keep_alive": KEEP_ALIVE},
                   timeout=180).raise_for_status()
 
 
 def unload(name=None):
-    """Frees a model's VRAM now, model() unless named (a game started, she rests). Quiet if Ollama isn't running."""
+    """Frees a model's VRAM now, model() unless named (a game started, she rests). Quiet if Ollama isn't running.
+    The llama-server is ended (its RAM comes back too), unless a request is in flight."""
+    if llama():
+        if name in (None, model()):
+            llama_server.stop()
+        return
     try:
         requests.post(f"{BASE_URL}/api/generate", json={"model": name or model(), "keep_alive": 0}, timeout=10)
     except requests.RequestException:

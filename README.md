@@ -346,6 +346,8 @@ comments. The most useful ones:
 | `UMAY_WAKE` | `on` | "Hey Umay" starts a spoken conversation (only on mains power, no game); `off` = never |
 | `UMAY_WINDOWS_WATCH`, `UMAY_WINDOWS_UNWANTED` | on, empty | Every 6 hours she checks what Windows undid since her first check (hibernation or Windows AI back on, a program starting with Windows again, a program matching the regex installed again) and tells you once |
 | `UMAY_MEMORY_MODEL` | empty | An Ollama model for the memory's work while she rests: it takes the GPU's room then (none of the RAM) and leaves when you're back or a game starts |
+| `UMAY_LOCAL_BACKEND`, `UMAY_LLAMA_EXE`, `UMAY_LLAMA_MODEL`, `UMAY_LLAMA_ARGS`, `UMAY_LLAMA_PORT` | Ollama | `llamacpp`: one big Mixture-of-Experts GGUF in a `llama-server` of her own does the talking, the tools' arguments and the memory's text work (about 3 GB of VRAM, 11-19 GB of RAM as file cache; stopped in a game). Falls back to Ollama if the two paths don't exist. `.env.example` has the details |
+| `UMAY_HEAVY_LOCAL` | empty | Which of `plan,fix,check` the big local model answers instead of Claude Code (a screenshot or a click's aim always stays with it) |
 | `UMAY_LOCAL_IDLE_MINUTES` | `5` | Unload the local model, stop loading ahead and let the memory learn after this long without a reply (`0` = always kept loaded, the memory learns whenever she isn't answering) |
 | `UMAY_RVC_IDLE_MINUTES` | `3` | Unload the voice pack after this long unused (it reloads in ~2 s when a conversation starts) |
 | `UMAY_HUD` | `on` | The HUD on the desktop (`off` = none) |

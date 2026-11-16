@@ -17,6 +17,10 @@ main thread, and a crash here never takes Umay down.
   of its monitor; Esc or a click outside shrinks it back. The credits panel and the storage panel's detail
   view took the place of the Ctrl+F1 panel's Credits and Disk tabs.
 - The panels stay below other windows, the orb above them.
+- Bottom right, above the panels button: the struck-through microphone while she isn't listening, and above it
+  (or in its spot) an amber "!" while Windows has undone some of the owner's trimming (windows_watch.alerts, read
+  every ALERTS_SECONDS from its state file). A click lists what came back; MARK AS SEEN hides it (hud.json
+  "alerts_seen") until something comes back again.
 
 stdin (from Umay), one JSON object per line: {"state": "idle|listening|thinking|researching|working|
 speaking"}, {"level": 0..1} (her voice while she speaks), {"say": text, "id": n, "seconds": s},
@@ -63,6 +67,7 @@ import hud_cortex
 import hud_layout
 import memory_editor
 import hud_windows
+import windows_watch
 
 FPS = 30
 CHECK_MS = 400          # how often the orb looks at what is on its monitor
@@ -75,6 +80,7 @@ HISTORY = 150           # vitals kept for the detail view's charts: 5 minutes at
 BALANCES_SECONDS = 600
 NEWS_SECONDS = 600
 MARKETS_SECONDS = 10    # one request for every symbol
+ALERTS_SECONDS = 30     # windows_watch's state file
 CODE_MARGIN = (14, 30)  # px from VS Code's right and bottom edges: off its scrollbar and status bar
 LABEL_H = 20            # the WORKING label under the orb in VS Code
 ORB_BIG, ORB_SMALL = 420, 96
@@ -677,6 +683,8 @@ class VitalsPanel(Panel):
             return ""
         gpu = self.data.get("gpu")
         hot = self.data["cpu"] > 90 or (gpu and gpu["temp"] >= 85)
+        if self.data.get("ram_level", 0) >= 2:   # little RAM free AND pages read back from the disk (pressure.py)
+            return "MEMORY PRESSURE"
         return "UNDER LOAD" if hot else "NOMINAL"
 
     def content(self, p, w, h):
@@ -688,6 +696,11 @@ class VitalsPanel(Panel):
             gauge(p, w - 26 - 66, 128, gpu["temp"] / 100, tcol, f"{gpu['temp']:.0f}°", "GPU TEMP", "LIMIT 87°C")
         rule(p, 26, 262, w - 52)
         text(p, 26, 292, "MEMORY", font(12, 600, 2.4), C["muted"])
+        # The RAM left for the next program, and the disk reads when that is short (pressure.py). The bar below leaves the
+        # model's file cache out of "used", so it can look fine while Windows pages the NPU server out (2026-11-16).
+        level = d.get("ram_level", 0)
+        free = f"FREE {d['ram_avail']:.1f} GB" + (f" · PAGING {d['pagein']:.0f}/s" if level and d.get("pagein") is not None else "")
+        text(p, 118, 292, free, font(11, 400, mono=True), C["mint"] if level == 0 else C["amber"] if level == 1 else C["hot"])
         text(p, w - 26, 292, f"{d['ram_used']:.1f} / {d['ram_total']:.0f} GB", font(12, 400, mono=True), C["text"], "right")
         # Umay's models in their own color inside the used RAM (the owner, 2026-11-11), like the VRAM below
         models = min(d.get("ram_models", 0.0), d["ram_used"])
@@ -1016,6 +1029,89 @@ class MutedMic(QWidget):
         p.end()
 
 
+class AlertBadge(QWidget):
+    """An amber "!" above the muted microphone (in its spot while she listens): what Windows undid of the owner's
+    trimming (windows_watch.alerts), until marked seen. Told aloud it was easy to miss (the owner, 2026-11-15).
+    A click lists it with when it was found and the fix; MARK AS SEEN keeps those ids in hud.json "alerts_seen"."""
+
+    SIZE, MARGIN, GAP = PanelsButton.SIZE, PanelsButton.MARGIN, 8
+
+    def __init__(self, store):
+        super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
+                         | Qt.WindowType.WindowStaysOnBottomHint | Qt.WindowType.WindowDoesNotAcceptFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.store, self.items, self.hover, self.on_change = store, [], False, None
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self.setToolTip("Windows undid some of the trimming. Click: what came back")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.relocate(False)
+
+    def unseen(self):
+        return windows_watch.unseen(self.items, self.store.data.get("alerts_seen"))
+
+    def relocate(self, above_mic):
+        slot = 3 if above_mic else 2  # 1: the panels button, 2: the microphone's spot
+        g = QGuiApplication.primaryScreen().availableGeometry()
+        self.move(g.x() + g.width() - self.SIZE - self.MARGIN,
+                  g.y() + g.height() - slot * self.SIZE - self.MARGIN - (slot - 1) * self.GAP)
+
+    def mark_seen(self):
+        self.store.data["alerts_seen"] = sorted(windows_watch.alert_id(a) for a in self.items)  # only today's kept
+        self.store.save()
+        if self.on_change is not None:
+            self.on_change()
+
+    @staticmethod
+    def when(at):
+        try:
+            return datetime.fromisoformat(str(at)).strftime("%d %b %H:%M").upper()
+        except ValueError:
+            return ""
+
+    def menu(self):
+        m = QMenu(self)
+        m.setStyleSheet(MENU_STYLE)
+        m.addAction("WINDOWS UNDID SOME OF THE TRIMMING").setEnabled(False)
+        for a in self.unseen() or self.items:
+            m.addAction(f"{self.when(a.get('at'))}   {a.get('text', '')}").setEnabled(False)
+        m.addSeparator()
+        if windows_watch.FIX_SCRIPT.exists():
+            m.addAction(f"FIX: {windows_watch.FIX_SCRIPT.name} on the Desktop, as admin").setEnabled(False)
+        m.addAction("MARK AS SEEN").triggered.connect(self.mark_seen)
+        return m
+
+    def enterEvent(self, _):
+        self.hover = True
+        self.update()
+
+    def leaveEvent(self, _):
+        self.hover = False
+        self.update()
+
+    def mouseReleaseEvent(self, ev):
+        if ev.button() != Qt.MouseButton.LeftButton:
+            return
+        m = self.menu()
+        size = m.sizeHint()
+        g = self.geometry()
+        m.exec(QPointF(g.right() - size.width(), g.top() - size.height() - 6).toPoint())  # above it, right-aligned
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        s = self.SIZE
+        p.setBrush(QColor(3, 12, 17, 200))
+        p.setPen(QPen(color(C["amber"], 1.0 if self.hover else 0.75), 1.4))
+        p.drawEllipse(QRectF(1, 1, s - 2, s - 2))
+        p.setPen(QPen(QColor(C["amber"]), 3.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawLine(QPointF(s / 2, 11), QPointF(s / 2, 25))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(C["amber"]))
+        p.drawEllipse(QPointF(s / 2, 32), 2.2, 2.2)
+        p.end()
+
+
 def two_lines(p, s, f, width):
     """`s` wrapped into at most two lines of `width` px, the second cut with "…"."""
     p.setFont(f)
@@ -1157,6 +1253,7 @@ class Hub(QObject):
     news = Signal(object)
     markets = Signal(object)
     memory = Signal(object)
+    alerts = Signal(object)
     message = Signal(object)
     closed = Signal()
 
@@ -1293,6 +1390,17 @@ def main(umay_pid=0):
     button = PanelsButton(store, panels.values())
     mic = MutedMic()
     mic.on_click = lambda: open_detail("audio", toggle=True)
+    alert = AlertBadge(store)
+
+    def stack():
+        """The "!" above the microphone while that shows, in its spot otherwise; shown while anything is unseen."""
+        alert.relocate(mic.isVisible())
+        alert.setVisible(shown["on"] and bool(alert.unseen()))
+    alert.on_change = stack
+
+    def got_alerts(items):
+        alert.items = list(items or [])
+        stack()
 
     def show_all(on):
         shown["on"] = on
@@ -1303,6 +1411,7 @@ def main(umay_pid=0):
             panel.setVisible(on and name not in hidden)
         button.setVisible(on)
         mic.setVisible(on and mic.muted)
+        stack()
         if cortex["it"] is not None:
             cortex["it"].set_shown(on)
         if not on:
@@ -1322,6 +1431,7 @@ def main(umay_pid=0):
         orb.relocate()
         button.relocate()
         mic.relocate()
+        stack()
         for panel in panels.values():
             panel.relocate()
 
@@ -1363,6 +1473,7 @@ def main(umay_pid=0):
     hub.news.connect(feed("news", panels["news"]))
     hub.markets.connect(feed("markets", panels["markets"]))
     hub.memory.connect(panels["memory"].set_data)
+    hub.alerts.connect(got_alerts)
 
     def on_message(m):
         if "state" in m and m["state"] in STATES:
@@ -1378,12 +1489,14 @@ def main(umay_pid=0):
         if "muted" in m:
             mic.muted = bool(m["muted"])
             mic.setVisible(shown["on"] and mic.muted)
+            stack()
         if "open" in m:
             open_detail(str(m["open"]), bool(m.get("toggle")))
         if "audio" in m:
             shared.data["audio"] = m["audio"]
             mic.muted = bool((m["audio"] or {}).get("muted"))
             mic.setVisible(shown["on"] and mic.muted)
+            stack()
             notify("audio")
         if "refresh" in m and shared.wake.get(str(m["refresh"])) is not None:  # who is followed changed
             shared.wake[str(m["refresh"])].set()
@@ -1419,6 +1532,7 @@ def main(umay_pid=0):
     _every(300, hud_data.read_drives, hub.drives, retry=60)
     _every(30, hud_data.read_calendar, hub.calendar)
     _every(5, cortex_graph.summary, hub.memory)
+    _every(ALERTS_SECONDS, windows_watch.alerts, hub.alerts)
     _every(60, hud_data.read_credits, hub.credits, retry=60)
     shared.wake["news"] = _every(NEWS_SECONDS, hud_feeds.read_news, hub.news, retry=120)
     shared.wake["markets"] = _every(MARKETS_SECONDS, hud_feeds.read_markets, hub.markets, retry=30)

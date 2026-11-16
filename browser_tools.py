@@ -18,18 +18,19 @@ import winreg
 from collections import Counter
 from urllib.parse import quote_plus, urlparse
 
-from pynput.keyboard import Controller
+from pynput.keyboard import Controller, Key
 
 OPERA_REG_KEY = r"Software\Clients\StartMenuInternet\Opera GXStable\shell\open\command"
 OPERA_PROCESS = "opera.exe"
 YOUTUBE_RESULTS = 10
 FOCUS_WAIT_SECONDS = 0.4
+FULLSCREEN_WAIT_SECONDS = 0.9   # YouTube's fullscreen takes a moment to cover the monitor
 FULLSCREEN_KEY = ("f",)  # YouTube's own shortcut (no extension involved)
 
 _user32 = ctypes.windll.user32
 _keyboard = Controller()
 _last_results = []  # [(title, url, entry)] from the latest search_youtube
-_request = {"text": ""}  # what the owner wrote in this request, in lower case
+_request = {"text": "", "videos": set()}  # what the owner wrote in this request, in lower case; the videos it opened
 HANDLE = re.compile(r"youtube\.com/(@[^/?#\s]+)", re.IGNORECASE)
 LATEST = re.compile(r"\b(latest|newest|most recent|last (video|upload)|en son|son video)", re.IGNORECASE)
 CHANNEL_WORD = re.compile(r"\b(channel|kanal)", re.IGNORECASE)
@@ -67,8 +68,26 @@ def _run(fn):
 
 
 def new_request(text):
-    """A new request from the owner: an address written in it is theirs, and is opened as written."""
+    """A new request from the owner: an address written in it is theirs, and is opened as written. A video opened
+    earlier may be opened again (see _opened_before)."""
     _request["text"] = (text or "").lower()
+    _request["videos"] = set()
+
+
+def _opened_before(video_id, what):
+    """The answer that says the video is open already, or None if this request hasn't opened it (remember it with
+    _open_video once it is). A plan opened one video three times (2026-11-16: the planner's "open it" and "play it"
+    steps, plus a retry after the model used a neighbouring tool): the tab was there, the extra ones were noise and
+    2 minutes of work."""
+    if video_id in _request["videos"]:
+        return (f"Already opened {what} earlier in this request, so it was not opened again. It is open in Opera GX: "
+                "control_video plays, pauses or seeks it.")
+    return None
+
+
+def _open_video(video_id, url):
+    _open(url)
+    _request["videos"].add(video_id)   # only once it really opened: a failed open may be tried again
 
 
 def _flat(address):
@@ -174,7 +193,10 @@ def open_latest_youtube_video(name: str = "") -> str:
         videos = _flat(f"{_address(entry)}/videos")
         if not videos:
             raise ToolError(f"{who} has no videos I can read.")
-        _open(f"https://www.youtube.com/watch?v={videos[0]['id']}")
+        again = _opened_before(videos[0]["id"], f"{who}'s latest video: {videos[0].get('title') or '?'}")
+        if again:
+            return again
+        _open_video(videos[0]["id"], f"https://www.youtube.com/watch?v={videos[0]['id']}")
         return f"Opened {who}'s latest video: {videos[0].get('title') or '?'}."
     return _run(run)
 
@@ -216,8 +238,11 @@ def open_youtube_result(number: int) -> str:
             raise ToolError("There's no YouTube search yet. Call search_youtube first.")
         if not 1 <= int(number) <= len(_last_results):
             raise ToolError(f"Pick a number between 1 and {len(_last_results)}.")
-        title, url, _ = _last_results[int(number) - 1]
-        _open(url)
+        title, url, entry = _last_results[int(number) - 1]
+        again = _opened_before(entry.get("id") or url, f"#{number}: {title}")
+        if again:
+            return again
+        _open_video(entry.get("id") or url, url)
         return f"Opened #{number}: {title}"
     return _run(run)
 
@@ -247,11 +272,25 @@ def _opera_window():
     return found[0] if found else None
 
 
+_focus_state = {"alt": False}   # the last _focus had to send an Alt tap
+
+
 def _focus(hwnd):
-    """Brings hwnd to the front. Windows only lets the foreground app do that, so a
-    synthetic Alt press first makes this process count as having had input."""
+    """Brings hwnd to the front. Already there: nothing is sent. Windows only lets the foreground app bring another
+    window forward, so when a plain SetForegroundWindow doesn't do it a synthetic Alt press makes this process count as
+    having had input. That Alt tap puts a Chromium browser into menu mode, and the next key (YouTube's "f") then acts as a
+    menu shortcut instead of reaching the video: why "make it fullscreen" opened a search bar and was reported done
+    (found 2026-11-16; press_fullscreen leaves the menu mode with Escape when _focus_state["alt"] is set)."""
+    _focus_state["alt"] = False
     if _user32.IsIconic(hwnd):
         _user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+    if _user32.GetForegroundWindow() == hwnd:
+        return True
+    _user32.SetForegroundWindow(hwnd)
+    time.sleep(FOCUS_WAIT_SECONDS)
+    if _user32.GetForegroundWindow() == hwnd:
+        return True
+    _focus_state["alt"] = True
     _user32.keybd_event(0x12, 0, 0, 0)  # Alt down
     _user32.keybd_event(0x12, 0, 2, 0)  # Alt up
     _user32.SetForegroundWindow(hwnd)
@@ -276,13 +315,61 @@ def _focused_opera():
     return hwnd
 
 
+class _Rect(ctypes.Structure):
+    _fields_ = [("left", wintypes.LONG), ("top", wintypes.LONG), ("right", wintypes.LONG), ("bottom", wintypes.LONG)]
+
+
+class _MonitorInfo(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", _Rect), ("rcWork", _Rect), ("dwFlags", wintypes.DWORD)]
+
+
+def _fullscreen(hwnd):
+    """True when the window's visible frame covers its whole monitor (taskbar area included: a maximized window stops at
+    the taskbar), False when it doesn't, None when Windows can't say."""
+    try:
+        frame = _Rect()
+        if ctypes.windll.dwmapi.DwmGetWindowAttribute(wintypes.HWND(hwnd), 9, ctypes.byref(frame), ctypes.sizeof(frame)) != 0:
+            return None   # 9 = DWMWA_EXTENDED_FRAME_BOUNDS
+        _user32.MonitorFromWindow.restype = wintypes.HANDLE
+        _user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+        _user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_MonitorInfo)]
+        monitor = _user32.MonitorFromWindow(wintypes.HWND(hwnd), 2)   # MONITOR_DEFAULTTONEAREST
+        info = _MonitorInfo()
+        info.cbSize = ctypes.sizeof(info)
+        if not monitor or not _user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            return None
+        m = info.rcMonitor
+        return all(abs(a - b) <= 2 for a, b in ((frame.left, m.left), (frame.top, m.top), (frame.right, m.right),
+                                                (frame.bottom, m.bottom)))
+    except (OSError, AttributeError, ctypes.ArgumentError):
+        return None
+
+
 def press_fullscreen() -> str:
-    """YouTube's "f" in Opera GX's current tab (web_control.control_video's 'fullscreen')."""
+    """YouTube's "f" in Opera GX's current tab (web_control.control_video's 'fullscreen'), and whether it worked: the window
+    covers its monitor afterwards. Before, the key was pressed blind and the result reported as done (2026-11-12 and 11-15:
+    a search bar opened instead, and Umay said fullscreen was on)."""
     def run():
-        _focused_opera()
+        hwnd = _focused_opera()
+        before = _fullscreen(hwnd)
+        if before:
+            return "Opera GX is already fullscreen, so nothing was pressed (the f key would leave it)."
+        if _focus_state["alt"]:
+            _press((Key.esc,))      # leaves the menu mode the Alt tap started: "f" would be a menu shortcut
+            time.sleep(0.15)
         _press(FULLSCREEN_KEY)
-        return ("Pressed YouTube's fullscreen key (f) in Opera GX's current tab: it toggles fullscreen. "
-                "Use look_at_screen to check if needed.")
+        time.sleep(FULLSCREEN_WAIT_SECONDS)
+        after = _fullscreen(hwnd)
+        if after is None or before is None:
+            return ("Pressed YouTube's fullscreen key (f) in Opera GX's current tab: it toggles fullscreen. "
+                    "I couldn't check the result: use look_at_screen to see whether it worked.")
+        if after:
+            return "Opera GX is fullscreen now."
+        _press((Key.esc,))
+        _press((Key.esc,))          # whatever the key went into (the address bar, a menu): leave it
+        return ("NOT done: I pressed f but Opera GX did not go fullscreen. The key most likely went to the address bar, a "
+                "menu or another field instead of the video; I cleared it with Escape. Tell the user plainly. They can "
+                "click on the video once and ask again, or use look_at_screen to see what is in front.")
     return _run(run)
 
 

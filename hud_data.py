@@ -28,7 +28,9 @@ import requests
 import config_loader
 import credit_log
 import holiday_days
+import llama_server
 import local_llm
+import pressure
 
 TIMEOUT = 10
 # WMO weather codes (Open-Meteo): text and the icon the panel draws.
@@ -209,7 +211,9 @@ def models_ram():
             total += getattr(info, "private", info.rss) if private else info.rss
         except psutil.Error:
             _models["pids"].pop(pid, None)
-    return total / 2 ** 30
+    # Umay's own big model (llama_server): its mapped model pages are the OS's file cache, which it takes back
+    # when another program needs the RAM; only its private memory is the model's.
+    return max(0, total - llama_server.reclaimable_bytes()) / 2 ** 30
 
 
 def read_vitals():
@@ -221,8 +225,11 @@ def read_vitals():
         down = (net.bytes_recv - _net["recv"]) / (now - _net["at"])
         up = (net.bytes_sent - _net["sent"]) / (now - _net["at"])
     _net.update(at=now, recv=net.bytes_recv, sent=net.bytes_sent)
+    avail, pagein = mem.available / 2 ** 30, pressure.pagein_per_s()   # the free RAM and the disk reads that say it matters
     return {
-        "cpu": psutil.cpu_percent(interval=None), "ram_used": mem.used / 2 ** 30, "ram_total": mem.total / 2 ** 30,
+        "ram_avail": avail, "pagein": pagein, "ram_level": pressure.level(avail, pagein),
+        "cpu": psutil.cpu_percent(interval=None), "ram_used": max(0, mem.used - llama_server.reclaimable_bytes()) / 2 ** 30,
+        "ram_total": mem.total / 2 ** 30,
         "ram_models": models_ram(),
         "gpu": read_gpu(), "llm_vram": local_llm.vram_mb() / 1024 if local_llm.on() else 0.0,
         "down": down, "up": up, "uptime": time.time() - psutil.boot_time(),

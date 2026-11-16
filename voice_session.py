@@ -6,7 +6,10 @@ Credits are only spent on what the owner said: "Umay, goodbye" is recognized her
 once, sending nothing; a turn with no speech in it (SilenceCut), or sound that never pauses for
 LONGEST seconds (a video, not someone talking to her), is never sent; speech is transcribed only
 by the local Whisper (no paid fallback here). If her voice can't say the answer, it goes to
-Telegram as text. voice_guard ends the conversation on battery or when a game shows up.
+Telegram as text. The owner ends it ("Umay, goodbye", Ctrl+F3), IDLE_SECONDS of silence does, and voice_guard
+only when it has decided a game runs (mode "game"); one busy GPU reading no longer does (2026-11-12: it cut off a
+reply while her own model loaded). An answer that comes after the conversation was closed goes to the text box
+(`write`), and the HUD's orb stops thinking (the owner's rule, 2026-11-12: it stayed thinking, the answer lost).
 
 While she listens (from the microphone, not in a call) the PC's volume on speakers drops to 5%
 (listen_volume.py) and comes back once the owner has said their task, or when the conversation ends.
@@ -27,10 +30,12 @@ AFTER_SPEECH = 0.3     # before listening again: the speakers' tail
 
 class Session:
     def __init__(self, answer, new_chat, transcribe, notify, activity, glow, log_dir, ended=None,
-                 recorder=None, idle_seconds=None, log_suffix="voice", duck=None):
+                 recorder=None, idle_seconds=None, log_suffix="voice", duck=None, write=None):
         """recorder: what records a turn (voice.Recorder: the microphone; a WhatsApp call's sound, calls.py).
-        duck: listen_volume.Ducker (the PC's volume drops while she listens; not in a call)."""
+        duck: listen_volume.Ducker (the PC's volume drops while she listens; not in a call).
+        write: puts a text in the text box (ai_assistant.reach_out), for an answer that came after the close."""
         self._duck = duck
+        self._write = write
         self._answer, self._new_chat, self._transcribe = answer, new_chat, transcribe
         self._recorder_class = recorder  # None: voice.Recorder, looked up when used
         self._idle_seconds, self._log_suffix = idle_seconds, log_suffix
@@ -172,10 +177,23 @@ class Session:
         hint, self._hint = self._hint, ""
         answer = self._answer(self._chat, text + hint + voice.SPOKEN_HINT)
         if not self._current(turn):
+            self._late(answer)
             return
         self._log("Umay", answer)
         self._set("speaking", "speak", "talk")
         voice.speak(answer, on_error=lambda e: self._not_said(answer, e), on_done=lambda: self._spoken(turn))
+
+    def _late(self, answer):
+        """The conversation was closed (a game, Ctrl+F3) while the answer was made: the HUD's orb, which the reply
+        put back to "think", is let go, and the answer goes to the text box (Telegram without one), in the log too."""
+        self._log("—", f"(answered after it closed, not said: {answer})")
+        if self._on:  # a new conversation already: it has its own orb and its own answer
+            return
+        self._activity(None)
+        try:
+            (self._write or self._notify)(answer)
+        except Exception as e:
+            print(f"Voice: the late answer couldn't be shown: {e!r}")
 
     def say(self, text, hint=""):
         """She speaks first (a call she made: why she called; something she brings up herself), then listens.
@@ -234,9 +252,9 @@ class _NoLight:
         pass
 
 
-def setup(answer, new_chat, notify, activity, log_dir, ended=None):
-    """Creates the session (main.py); voice_guard ends it on battery or in a game. UMAY_GLOW=on brings the
-    light around the screen back."""
+def setup(answer, new_chat, notify, activity, log_dir, ended=None, write=None):
+    """Creates the session (main.py); voice_guard ends it once it has decided a game runs (not on one busy reading).
+    UMAY_GLOW=on brings the light around the screen back. write: see Session."""
     import listen_volume
     import voice_guard
 
@@ -247,10 +265,10 @@ def setup(answer, new_chat, notify, activity, log_dir, ended=None):
     if _session["it"] is None:
         listen_volume.restore_left_over()
         _session["it"] = Session(answer, new_chat, _local_transcribe, notify, activity, light, log_dir, ended,
-                                 duck=listen_volume.ducker())
+                                 duck=listen_volume.ducker(), write=write)
         voice_guard.listeners.append(
-            lambda mode, suspect: _session["it"].close("battery, a game, or the GPU busy")
-            if (mode != "ready" or suspect) and _session["it"].active() else None)
+            lambda mode, suspect: _session["it"].close("a game") if mode == "game" and _session["it"].active()
+            else None)
     return _session["it"]
 
 

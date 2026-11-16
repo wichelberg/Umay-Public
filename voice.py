@@ -260,6 +260,25 @@ def _fix_heard(text):
     return text
 
 
+# Whisper on music, noise or a very short clip sometimes writes one phrase over and over: "Thank you. Thank you. Thank you. ..."
+# (41-91 times a day since 2026-11-11, each one 11-12 s of the NPU). Nobody says the same phrase four times in a 1-3 s clip, so a
+# phrase repeated that often is no speech. "no, no, no" (3) and "thank you" (1) stay.
+LOOPED = re.compile(r"\b([\w'’]+(?: [\w'’]+){0,5}?)(?:[\s.,!?;:…-]+\1\b){3,}", re.IGNORECASE)
+
+
+def looped(text):
+    """The text is one phrase repeated 4 times or more (Whisper's loop on non-speech)."""
+    return bool(text) and bool(LOOPED.search(text))
+
+
+def _clean_heard(text):
+    """What Whisper wrote, or "" when it is such a loop: it counts as silence, nothing is said to Umay."""
+    if looped(text):
+        print(f"Voice: a looping transcript was dropped ({len(text)} characters: {text[:40]!r}...)")
+        return ""
+    return text
+
+
 def _npu_heard(wav_bytes, prompt):
     """The text Whisper on the NPU hears (npu.py), "" for silence; None when it isn't served there or fails:
     then the worker on the GPU answers as before. UMAY_NPU_ASR=off: never asked. Nor while the NPU's chat model
@@ -314,14 +333,15 @@ class LocalStt(_Worker):
         there (_npu_heard); this worker when the NPU isn't there or fails."""
         heard = _npu_heard(wav_bytes, prompt or _env("UMAY_STT_PROMPT", ""))
         if heard is not None:
-            return _fix_heard(heard)
+            return _fix_heard(_clean_heard(heard))
         if not self.available():
             return None
         _audio_dir.mkdir(exist_ok=True)
         path = _audio_dir / f"{uuid.uuid4().hex[:10]}_heard.wav"
         path.write_bytes(wav_bytes)
         try:
-            return _fix_heard(self.request({"wav": str(path), "prompt": prompt or _env("UMAY_STT_PROMPT", "")})["text"])
+            return _fix_heard(_clean_heard(
+                self.request({"wav": str(path), "prompt": prompt or _env("UMAY_STT_PROMPT", "")})["text"]))
         finally:
             path.unlink(missing_ok=True)
 

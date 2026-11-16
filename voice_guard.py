@@ -40,6 +40,7 @@ from datetime import datetime
 
 import psutil
 
+import llama_server
 import local_llm
 import npu
 import paths
@@ -230,6 +231,7 @@ def _log(text):
 def apply(mode, reading=None):
     """Puts the workers in line with `mode` (`reading`: the GPU reading it came from)."""
     voice.gaming["on"] = mode == "game"
+    llama_server.hold["on"] = mode == "game"   # nothing may start the big model again mid-game (llama_server.ensure)
     asleep = mode == "ready" and local_llm.on() and local_llm.dormant()
     keep = mode == "ready" and not asleep
     voice.local_tts.keep_loaded = keep
@@ -240,6 +242,13 @@ def apply(mode, reading=None):
         voice.local_tts.stop(at_once=True)
         voice.local_stt.stop(at_once=True)
         voice.voice_pack.stop(at_once=True)
+        if local_llm.llama():   # the big model goes whatever the VRAM says: it holds 11-19 GB of RAM too
+            if llama_server.running() and not local_llm.busy():
+                llm_mb = local_llm.vram_mb()
+                local_llm.unload()
+                _log(f"game: the big local model is stopped ({llm_mb:.0f} MB of VRAM and its RAM back, {reading}); "
+                     f"replies move to the NPU")
+            return
         llm_mb = local_llm.vram_mb() if local_llm.on() else 0
         moved = local_llm.picks() and npu.chat_ready()  # her replies come from the NPU's chat model in a game
         if llm_mb and not local_llm.busy() and (moved or llm_must_go(reading, voice_mb)):
@@ -276,7 +285,7 @@ def _rest():
     their own idle time) and the local model goes now (~6 GB of VRAM and RAM). "Hey Umay" still works: the NPU
     hears it. The next reply loads the model again; memory work that loads it lets it go again afterwards."""
     llm_mb = local_llm.vram_mb()
-    if llm_mb and not local_llm.busy():
+    if (llm_mb or (local_llm.llama() and llama_server.running())) and not local_llm.busy():
         local_llm.unload()
         _log(f"no reply for {local_llm.idle_minutes():g} min: local model unloaded ({llm_mb:.0f} MB)")
 

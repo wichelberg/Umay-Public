@@ -219,6 +219,23 @@ def check(plan, names):
     return {"steps": steps, "ask_user": questions}
 
 
+def with_tool_enum(schema, names):
+    """A copy of a plan schema whose "tools" lists may only hold real tool names. A local model given free strings
+    copied the catalog's "name(params)" line into them (107 of 117 plans, 2026-11-15): with the enum the server
+    enforces bare names (0 invented in 117)."""
+    def walk(node):
+        if isinstance(node, dict):
+            out = {k: walk(v) for k, v in node.items()}
+            tools = out.get("properties", {}).get("tools") if isinstance(out.get("properties"), dict) else None
+            if isinstance(tools, dict) and isinstance(tools.get("items"), dict):
+                tools["items"] = {"type": "string", "enum": sorted(names)}
+            return out
+        if isinstance(node, list):
+            return [walk(v) for v in node]
+        return node
+    return walk(schema)
+
+
 def make(request, recent, tools, today):
     """The heavy model's plan for `request` (`recent`: the conversation just before it, for follow-ups), or None.
     Never give it the memory (memory_cortex): the heavy model is a cloud model and the memory stays on this PC
@@ -227,8 +244,10 @@ def make(request, recent, tools, today):
     if recent:
         prompt += f"The conversation just before (for context):\n{recent}\n\n"
     prompt += f"Request from the owner: {request}"
-    plan = heavy_model.ask(prompt, "plan", schema=SCHEMA, system=PLANNER + catalog(tools))
-    return check(plan, {t["function"]["name"] for t in tools})
+    names = {t["function"]["name"] for t in tools}
+    schema = with_tool_enum(SCHEMA, names) if heavy_model.is_local("plan") else SCHEMA
+    plan = heavy_model.ask(prompt, "plan", schema=schema, system=PLANNER + catalog(tools))
+    return check(plan, names)
 
 
 def step_tools(step, names, last=False):
@@ -299,7 +318,8 @@ def fix(request, steps, index, results, what, tools):
         FIX_PROMPT.format(request=request, plan=plan_text(steps), results=results_text(results),
                           step=f"{index + 1}) {steps[index]['do']}", what=what[:1500],
                           failed="It answered that it couldn't." if what else "It gave no answer."),
-        "fix", schema=FIX_SCHEMA, system=PLANNER + catalog(tools))
+        "fix", schema=with_tool_enum(FIX_SCHEMA, names) if heavy_model.is_local("fix") else FIX_SCHEMA,
+        system=PLANNER + catalog(tools))
     if not isinstance(answer, dict):
         return None, None
     if answer.get("give_up"):

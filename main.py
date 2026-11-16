@@ -212,7 +212,8 @@ def main():
                         new_chat=ai_assistant.new_chat,
                         notify=lambda text: pc_tools.fallback_notify(text),  # Telegram, once it's connected
                         activity=hud.activity, log_dir=ai_assistant.CHAT_LOG_DIR,
-                        ended=lambda chat: memory_cortex.conversation_ended((chat or {}).get("log_path")))
+                        ended=lambda chat: memory_cortex.conversation_ended((chat or {}).get("log_path")),
+                        write=ai_assistant.reach_out)  # an answer that came after a game closed it
     # Umay on the phone (WhatsApp Beta, her own number): the same conversation, over a call.
     calls.configure(answer=lambda chat, text: ai_assistant.answer_message(chat, text, source="call"),
                     new_chat=ai_assistant.new_chat, notify=lambda text: pc_tools.fallback_notify(text),

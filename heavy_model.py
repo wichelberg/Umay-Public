@@ -30,9 +30,14 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+import requests
+
 import claude_bridge
+import llama_server
+import local_llm
 
 DEFAULT = "claude-code:haiku:low"
+LOCAL_PURPOSES = ("plan", "fix", "check")   # what UMAY_HEAVY_LOCAL may hand to the local big model
 MAX_CALLS = 40  # a plan, a check per step and an aim per click: a three-field mail used up 20 (2026-11-06)
 TIMEOUT_S = 120
 SYSTEM = ("You are a careful helper for Umay, a desktop assistant on a Windows PC. Answer exactly what you are "
@@ -52,7 +57,20 @@ def setting():
 
 
 def on():
-    return setting() is not None
+    return setting() is not None or (bool(local_purposes()) and local_llm.llama())
+
+
+def local_purposes():
+    """UMAY_HEAVY_LOCAL (e.g. plan,fix,check; empty = none): the questions the local big model answers instead of
+    Claude Code (the owner's choice 2026-11-16, with UMAY_LOCAL_BACKEND=llamacpp). Never one with a screenshot: those
+    (verifying from the screen, aiming a click) stay with the heavy model. Each purpose has its own switch because only
+    planning has been measured against Haiku."""
+    wanted = {p.strip() for p in os.environ.get("UMAY_HEAVY_LOCAL", "").lower().split(",")}
+    return tuple(p for p in LOCAL_PURPOSES if p in wanted)
+
+
+def is_local(purpose, image=None):
+    return image is None and purpose in local_purposes() and local_llm.llama()
 
 
 def max_calls():
@@ -125,10 +143,41 @@ def _log(purpose, seconds, result, note=""):
         pass
 
 
+def _ask_local(prompt, purpose, schema, system):
+    """The local big model's answer (structured with `schema`, else text), or None when it can't give one. It counts
+    toward the call budget, goes into heavy_model.log marked local and is part of answering the owner. No scrub:
+    nothing leaves the PC."""
+    _local.calls = calls_used() + 1
+    started = time.monotonic()
+    # The planner's system prompt + tool catalog is ~3,100 tokens: its saved state goes back into the server after a restart
+    prefix = system if len(system) >= llama_server.PREFIX_MIN_CHARS else ""
+    try:
+        with local_llm.working():
+            if prefix:
+                llama_server.ensure()               # a stopped server starts first: there is a slot to restore into
+                llama_server.restore_prefix(prefix)
+            if schema is not None:
+                answer = llama_server.ask_json(prompt, schema, system=system, timeout=TIMEOUT_S * 3)
+            else:
+                answer = llama_server.ask_text(prompt, system=system, timeout=TIMEOUT_S * 3) or None
+    except (requests.RequestException, ValueError, KeyError, IndexError) as e:
+        _log(purpose, time.monotonic() - started, {}, f"LOCAL FAILED {type(e).__name__}: {e}"[:200])
+        return None
+    if prefix and answer is not None:
+        llama_server.save_prefix(prefix)
+    _log(purpose, time.monotonic() - started, {}, "local")
+    return answer
+
+
 def ask(prompt, purpose, schema=None, image=None, system=SYSTEM):
     """One question to the heavy model. `image`: JPEG bytes it should look at (it reads them from a file named
     in the prompt's `{image}`). Returns the structured answer (with `schema`) or the text; None when there is
     no heavy model, the request's budget is used up, or the call fails."""
+    if is_local(purpose, image) and calls_used() < max_calls():
+        answer = _ask_local(prompt, purpose, schema, system)
+        if answer is not None:
+            return answer
+        # the local model didn't answer (a game, it won't start): the heavy model does, as before
     chosen = setting()
     if chosen is None or calls_used() >= max_calls():
         return None

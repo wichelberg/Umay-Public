@@ -5,12 +5,16 @@ and ~20 GB of commit: "will a Windows update bring these back? Umay could check"
 The first check takes a baseline (what is off now stays off); every later one compares with it:
 - hibernation: C:\\hiberfil.sys there again (it was gone);
 - Windows AI: the WindowsAI policy (DisableAIDataAnalysis) gone again;
+- Windows AI Components Host (service WSAIFabricSvc, which starts the WorkloadsSessionHost processes: ~3 GB of RAM,
+  measured 2026-11-15): switched from Disabled to on again. Nothing needs it (not the eyes, not the NPU server);
 - startup: an entry that was off is on again, or a new one starts with Windows (Run keys and the Startup folders, by
   Task Manager's own on/off: StartupApproved);
 - programs: one whose name matches UMAY_WINDOWS_UNWANTED (a regex, e.g. "GiMATE|WebAdvisor") installed again.
 
 Each finding is told once (companion, "important": aloud at the PC, Telegram when away), again only after it was
-fixed and came back. It only reads: putting things right needs admin rights, so it names the fix (FIX_SCRIPT if it
+fixed and came back. Told aloud it is easy to miss, so it also stays in the state file as an alert (alerts()) while
+it lasts: the HUD shows a "!" above the muted-microphone spot, bottom right, and a click lists what came back (the
+owner's ask, 2026-11-15). Marked seen there (hud.json), it is shown again only when it comes back after a fix. It only reads: putting things right needs admin rights, so it names the fix (FIX_SCRIPT if it
 exists). Every CHECK_HOURS, first FIRST_CHECK_MINUTES after Umay starts. State: %LOCALAPPDATA%\\Umay\\windows_watch.json.
 .env: UMAY_WINDOWS_WATCH (off = never), UMAY_WINDOWS_UNWANTED.
 """
@@ -29,6 +33,7 @@ CHECK_HOURS = 6
 FIRST_CHECK_MINUTES = 10
 HIBERFIL = Path(os.environ.get("SystemDrive", "C:") + "\\") / "hiberfil.sys"
 AI_KEY = r"Software\Policies\Microsoft\Windows\WindowsAI"
+AI_FABRIC_KEY = r"SYSTEM\CurrentControlSet\Services\WSAIFabricSvc"
 FIX_SCRIPT = Path.home() / "Desktop" / "windows_trim_admin.ps1"
 RUN = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN32 = r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run"
@@ -128,11 +133,17 @@ def ai_policy():
     return False
 
 
+def ai_fabric_off():
+    """True: the Windows AI Components Host service is Disabled (Start = 4); False: it can start; None: no such service."""
+    start = _values(winreg.HKEY_LOCAL_MACHINE, AI_FABRIC_KEY).get("Start")
+    return None if start is None else start == 4
+
+
 def read():
-    """What the checks compare: {hiberfil, ai_policy, startup (on), startup_off, programs}."""
+    """What the checks compare: {hiberfil, ai_policy, ai_fabric_off, startup (on), startup_off, programs}."""
     on, off = startup()
-    return {"hiberfil": HIBERFIL.exists(), "ai_policy": ai_policy(), "startup": sorted(on), "startup_off": sorted(off),
-            "programs": sorted(programs())}
+    return {"hiberfil": HIBERFIL.exists(), "ai_policy": ai_policy(), "ai_fabric_off": ai_fabric_off(),
+            "startup": sorted(on), "startup_off": sorted(off), "programs": sorted(programs())}
 
 
 # --- the rules (pure: tests/test_windows_watch.py) ----------------------------------------------------------------
@@ -148,6 +159,8 @@ def findings(baseline, now, unwanted=""):
         out["hiberfil"] = f"the hibernation file is back on the disk{size}"
     if baseline["ai_policy"] and not now["ai_policy"]:
         out["ai_policy"] = "Windows AI (Recall) is allowed again"
+    if baseline.get("ai_fabric_off") and now.get("ai_fabric_off") is False:
+        out["ai_fabric"] = "Windows AI Components Host is on again (~3 GB RAM)"
     for name in sorted(set(now["startup"]) - set(baseline["startup"])):
         again = name in baseline.get("startup_off", [])
         out["startup:" + name] = f"{name} starts with Windows {'again' if again else 'now (new)'}"
@@ -160,6 +173,23 @@ def findings(baseline, now, unwanted=""):
             if pattern and pattern.search(name):
                 out["program:" + name] = f"{name} is installed again"
     return out
+
+
+def alert_list(old, found, at):
+    """The alerts the HUD shows: one per finding still there, keeping when it was first found ({key, text, at})."""
+    kept = {a.get("key"): a for a in old or [] if isinstance(a, dict) and a.get("key") in found}
+    return [kept.get(k) or {"key": k, "text": found[k], "at": at} for k in sorted(found)]
+
+
+def alert_id(alert):
+    """Seen is remembered per finding and per time it was found: one that comes back after a fix is new."""
+    return f"{alert.get('key')}@{alert.get('at')}"
+
+
+def unseen(alerts_, seen):
+    """The alerts whose id isn't in `seen` (the ids the owner marked seen in the HUD)."""
+    seen = set(seen or ())
+    return [a for a in alerts_ or [] if alert_id(a) not in seen]
 
 
 def message(new):
@@ -176,6 +206,11 @@ def _load():
         return json.loads(_state_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+
+
+def alerts():
+    """For the HUD (its own process, reads the file): [{key, text, at}] of what Windows undid and isn't put right."""
+    return [a for a in _load().get("alerts", []) if isinstance(a, dict)]
 
 
 def _save(state):
@@ -196,7 +231,10 @@ def check(tell, now=None):
         _log(f"baseline taken: hiberfil {now['hiberfil']}, AI policy {now['ai_policy']}, "
              f"{len(now['startup'])} startup entries on")
         return []
+    if "ai_fabric_off" not in state["baseline"] and now.get("ai_fabric_off"):
+        state["baseline"]["ai_fabric_off"] = True  # the baseline is older than this check: it learns it once it is off
     found = findings(state["baseline"], now, os.environ.get("UMAY_WINDOWS_UNWANTED", ""))
+    state["alerts"] = alert_list(state.get("alerts"), found, datetime.now().isoformat(timespec="seconds"))
     told = set(state.get("told", [])) & set(found)  # fixed since: told again if it comes back
     new = {k: v for k, v in found.items() if k not in told}
     if new:
