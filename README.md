@@ -120,6 +120,7 @@ Ekranda ne var, video durdu mu?
 | Click on the orb | Opens / closes the text box beside it (Esc also closes it). Her answer shows in the box, silently, while the orb thinks and then talks |
 | **Ctrl+F1** | Opens / closes the text box (beside the orb, or bottom right with the HUD hidden), in the HUD's look |
 | **Ctrl+F2** | Hides / shows the HUD |
+| **Ctrl+F7** | Coding mode (also "Activate coding mode", spoken or typed): a window where the local 35B works on a coding task in a folder you pick (VS Code's open folder by default; never Umay's own). It reads, searches, edits, creates files and runs the folder's tests, then you press ✔ Keep or ✖ Undo; no new task until you do. The window's **Voice → coding** button (off whenever it opens) sends everything you say there to the 35B instead of the normal Umay. Change the key with `UMAY_CODING_HOTKEY` (not Ctrl+F4: that closes the tab in VS Code and the browsers) |
 | **Ctrl+F3** | The audio panel: STOP / START LISTENING (the microphone closes to her, a spoken conversation ends, and a muted microphone shows above the bottom-right panels button), and the microphone and the speakers or headphones she uses, read again from Windows at every press. A click uses a device at once and keeps it (`%LOCALAPPDATA%\Umay\audio.json`). Without the HUD, Ctrl+F3 only stops or starts listening |
 | Click on a HUD panel | Grows it into its detailed view in the middle of its monitor; Esc, a click outside it or its ✕ shrinks it back. Dragging a panel still moves it |
 

@@ -1,5 +1,9 @@
 import sys
 
+if __name__ == "__main__" and "--coding" in sys.argv:  # the coding window's own process (coding_mode.open_window)
+    import coding_window
+
+    sys.exit(coding_window.main(int(sys.argv[-1]) if sys.argv[-1].isdigit() else 0))
 if __name__ == "__main__" and "--hud" in sys.argv:  # the HUD's own process (hud.py starts it)
     import hud_app
 
@@ -18,6 +22,7 @@ import calls
 import alert
 import chat_box
 import check_event
+import coding_mode
 import companion
 import config_loader
 import eyes
@@ -195,6 +200,13 @@ def _start_companion():
     })
 
 
+def _voice_answer(chat, text):
+    """A spoken turn: coding mode first (its voice button on = the words are a task for the 35B, never for the normal
+    Umay), else the normal answer. coding_mode.voice_turn: None = not for it, "" = noise, nothing to say."""
+    heard = coding_mode.voice_turn(chat, text)
+    return heard if heard is not None else ai_assistant.answer_message(chat, text, source="voice")
+
+
 def main():
     if not only_instance():
         print("Umay is already running.")
@@ -208,7 +220,8 @@ def main():
     telegram_listener.start()
     health_monitor.start()
     voice_guard.start()
-    voice_session.setup(answer=lambda chat, text: ai_assistant.answer_message(chat, text, source="voice"),
+    voice_session.stay_open = coding_mode.voice_wanted   # coding mode's voice button keeps the conversation open
+    voice_session.setup(answer=lambda chat, text: _voice_answer(chat, text),
                         new_chat=ai_assistant.new_chat,
                         notify=lambda text: pc_tools.fallback_notify(text),  # Telegram, once it's connected
                         activity=hud.activity, log_dir=ai_assistant.CHAT_LOG_DIR,

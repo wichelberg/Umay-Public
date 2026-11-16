@@ -28,6 +28,12 @@ LONGEST = 15.0         # one turn: longer without a pause is not someone talking
 AFTER_SPEECH = 0.3     # before listening again: the speakers' tail
 
 
+def stay_open():
+    """Set by main.py to coding_mode.voice_wanted: true while coding mode's voice button is on, so the conversation
+    stays open (no idle end, the PC's volume is not ducked meanwhile)."""
+    return False
+
+
 class Session:
     def __init__(self, answer, new_chat, transcribe, notify, activity, glow, log_dir, ended=None,
                  recorder=None, idle_seconds=None, log_suffix="voice", duck=None, write=None):
@@ -119,7 +125,7 @@ class Session:
     def _set(self, state, glow_mode, activity):
         self.state = state
         if self._duck is not None:  # down only while she listens: back up once the owner has said it
-            self._duck.down() if state == "listening" else self._duck.up()
+            self._duck.down() if state == "listening" and not stay_open() else self._duck.up()
         self._glow.set_mode(glow_mode)
         self._activity(activity)
 
@@ -142,6 +148,8 @@ class Session:
 
     def _idle_or_listen(self, turn):
         idle = IDLE_SECONDS if self._idle_seconds is None else self._idle_seconds
+        if stay_open():           # coding mode's voice button is on: a long task does not end the conversation
+            self._last_speech = time.monotonic()
         if time.monotonic() - self._last_speech >= idle:
             self.close("nothing said")
         else:
@@ -179,6 +187,8 @@ class Session:
         if not self._current(turn):
             self._late(answer)
             return
+        if not (answer or "").strip():   # coding mode heard noise (a made-up "Thank you."): nothing to say
+            return self._idle_or_listen(turn)
         self._log("Umay", answer)
         self._set("speaking", "speak", "talk")
         voice.speak(answer, on_error=lambda e: self._not_said(answer, e), on_done=lambda: self._spoken(turn))

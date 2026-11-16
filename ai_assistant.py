@@ -20,6 +20,7 @@ import audio_devices
 import browser_tools
 import calendar_tools
 import chat_box
+import coding_mode
 import credit_log
 import day_plan
 import disk_watch
@@ -872,6 +873,10 @@ def _send_message(chat, user_text, source="other"):
         answer = markets_follow.run(*market) if market is not None else news_follow.run(*follow)
         messages.append({"role": "assistant", "content": answer})
         return answer
+    if source in ("voice", "box") and coding_mode.asked(user_text):  # "activate coding mode": the coding window
+        answer = coding_mode.open_window(source)
+        messages.append({"role": "assistant", "content": answer})
+        return answer
     if memory_editor.asked(user_text):  # "open the memory editor": a window on the PC, no model needed
         memory_editor.open_editor()
         answer = "The memory editor is open on the PC, dear."
@@ -1604,6 +1609,14 @@ def ask_flash(prompt, what="", source="disk"):
 HOTKEY = "<ctrl>+<f1>"       # the text box
 HUD_HOTKEY = "<ctrl>+<f2>"   # hide / show the HUD
 MIC_HOTKEY = "<ctrl>+<f3>"   # the audio panel: stop / start listening, microphone, speakers
+# Coding mode's window. Not Ctrl+F4 (the owner's wish): pynput can't swallow a key, and Ctrl+F4 closes the tab in VS Code
+# and the browsers; Ctrl+F5 refreshes a page and Ctrl+F6 changes tab. UMAY_CODING_HOTKEY changes it ("<ctrl>+<f7>").
+CODING_HOTKEY = os.environ.get("UMAY_CODING_HOTKEY", "").strip() or "<ctrl>+<f7>"
+
+
+def toggle_coding():
+    """Ctrl+F7: the coding window, off the hotkey's thread."""
+    threading.Thread(target=coding_mode.toggle_window, daemon=True).start()
 
 
 def current_language():
@@ -1614,7 +1627,8 @@ def start_ai_assistant():
     """Starts the global hotkeys: Ctrl+F1 the text box, Ctrl+F2 hides / shows the HUD, Ctrl+F3 the audio panel."""
     if _state["listener"] is not None:
         return  # already running
-    listener = keyboard.GlobalHotKeys({HOTKEY: toggle_chat_box, HUD_HOTKEY: toggle_hud, MIC_HOTKEY: toggle_mic})
+    listener = keyboard.GlobalHotKeys({HOTKEY: toggle_chat_box, HUD_HOTKEY: toggle_hud, MIC_HOTKEY: toggle_mic,
+                                       CODING_HOTKEY: toggle_coding})
     listener.daemon = True
     listener.start()
     _state["listener"] = listener
