@@ -32,6 +32,7 @@ import heavy_model
 import hud
 import input_tools
 import local_llm
+import local_search
 import mail_tools
 import npu
 import memory_cortex
@@ -87,7 +88,25 @@ def _call_with_retry(fn, retries=2, delay=2.0):
     raise last_error
 
 
-_tavily_client = TavilyClient(api_key=os.environ.get("TAVILY_API_KEY"))  # .env is loaded by paths
+try:
+    _tavily_client = TavilyClient(api_key=os.environ.get("TAVILY_API_KEY"))  # .env is loaded by paths
+except Exception:   # no key: search is local_search's (UMAY_SEARCH), Tavily is only the owner's choice
+    _tavily_client = None
+SEARCH_REMAINING = 10 ** 6   # what search_remaining() says when searching costs nothing: no credit to run out of
+
+
+def search_mode():
+    """UMAY_SEARCH: `local` (default; local_search, no account, no credit) or `tavily` (the old way, with its credit)."""
+    return "tavily" if os.environ.get("UMAY_SEARCH", "").strip().lower() == "tavily" else "local"
+
+
+def search_results(query, max_results=5, pages=0, **filters):
+    """[{title, url, content[, published_date, page]}] for a query. filters: topic="news", time_range="day|week|month|year"
+    (Tavily's words; local_search turns them into its own). pages: how many of the first results get their article text."""
+    if search_mode() == "tavily":
+        return (_tavily_client.search(query, max_results=max_results, **filters) or {}).get("results", [])
+    return local_search.enrich(local_search.search(query, max_results, **filters), pages=pages) if pages \
+        else local_search.search(query, max_results, **filters)
 
 
 def _load_personality():
@@ -285,16 +304,16 @@ def web_search(query: str) -> str:
     Args:
         query: The search query to look up on the web.
     """
-    credit_log.before_search()
+    if search_mode() == "tavily":
+        credit_log.before_search()
     news = bool(NEWS_ASKED.search(query) or NEWS_ASKED.search(getattr(_memory, "owner_said", "")))
     filters = {"topic": "news", "time_range": "day"} if news else \
         ({"time_range": "month"} if RECENT_QUERY.search(query) else {})
-    try:
-        response = _tavily_client.search(query, max_results=5, **filters)
+    try:   # news is headlines (the dates matter, not the pages); anything else also reads the first two pages
+        results = search_results(query, max_results=5, pages=0 if news else 2, **filters)
     except Exception as e:
         return i18n.get(_language, "web_search_failed", error=e)
 
-    results = response.get("results", [])
     if news:  # the owner's rule, 2026-11-08: news is today's or it isn't said at all
         results = _todays(results)
         if not results:
@@ -306,6 +325,7 @@ def web_search(query: str) -> str:
 
     return "\n".join(
         f"- {r.get('title', '')} ({r.get('url', '')})\n  {r.get('content', '')}"
+        + (f"\n  Page text: {r['page']}" if r.get("page") else "")
         for r in results
     )
 
@@ -1355,8 +1375,15 @@ if not MODES["umay"]["local"]:  # the local model's replies cost nothing
 
 
 def tavily_search(query, max_results=3):
-    """Raw Tavily results [{title, url, content}] for background work (memory_cortex's SELF research)."""
-    return (_tavily_client.search(query, max_results=max_results) or {}).get("results", [])
+    """Raw results [{title, url, content}] for background work (memory_cortex's SELF research): local_search's, or
+    Tavily's with UMAY_SEARCH=tavily (the name is from when it was the only one)."""
+    return search_results(query, max_results=max_results)
+
+
+def search_remaining():
+    """The search budget memory_cortex checks before it researches: Tavily's credit left, or a number that never runs
+    out when searching is local (None while Tavily's balance is unknown, which stops the research as before)."""
+    return _tavily_remaining() if search_mode() == "tavily" else SEARCH_REMAINING
 
 
 def _get_tavily_credits():
@@ -1405,6 +1432,7 @@ def _box_open():
         _state["chat"] = new_chat()
         _state["log_path"] = _new_log_path()
     hud.activity("listen")
+    local_llm.warm()    # she listens (written): the big model starts now, not at the first message
 
 
 def _box_close():

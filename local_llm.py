@@ -128,11 +128,32 @@ def ensure_model():
     _made["model"] = name
 
 
+def _coding_running():
+    """The coding model's own server (coding_server.py) holds the card (a RAM-only one in a game doesn't); False when
+    that module can't be loaded."""
+    try:
+        import coding_server
+        return coding_server.on_gpu()
+    except Exception:
+        return False
+
+
+def _coding_yields():
+    try:
+        import coding_server
+        if coding_server.yield_to_reply():
+            print("Local model: the coding model's idle server was stopped for a reply")
+    except Exception:
+        pass
+
+
 @contextlib.contextmanager
 def working(background=False):
     """Around a request to the local model: busy() is true meanwhile and for BUSY_SECONDS after. A reply to the
     owner (background=False) makes answering() true too; memory work (background=True) doesn't, so it doesn't
     stop itself: waiting on its own requests, the memory learnt one log per 5 minutes (2026-11-07)."""
+    if not background:
+        _coding_yields()    # a reply needs the card: an idle coding model's server goes (coding_server)
     with _lock:
         _state["working"] += 1
         if not background:
@@ -179,7 +200,7 @@ def quiet():
     (dormant), so it doesn't stack on the talker and the voice. 2026-11-11: the memory's work right after each talk
     (a second NPU server, 5.4 GB, and Whisper's stand-in, 2.6 GB) took the RAM to 97%. idle_minutes() 0: whenever
     no reply is being made, as before."""
-    return not answering() and (idle_minutes() == 0 or dormant())
+    return not answering() and (idle_minutes() == 0 or dormant()) and not _coding_running()   # the card is the coding model's
 
 
 def memory_model():
@@ -212,6 +233,49 @@ def load():
         return
     requests.post(f"{BASE_URL}/api/generate", json={"model": model(), "keep_alive": KEEP_ALIVE},
                   timeout=180).raise_for_status()
+
+
+_warm = {"keys": set(), "lock": threading.Lock()}
+
+
+def warming():
+    """The big model is being started or primed for the owner right now (warm)."""
+    return bool(_warm["keys"])
+
+
+def warm(prime=None, key="generic", done=None):
+    """She starts to listen (spoken or in the text box) or the coding window opened: the big local model is started in
+    the background now, so the first request does not wait for it (measured 2026-11-17: the first request after a start
+    took 28 s for 382 tokens, the next ones 0.5-0.7 s). Returns at once. It counts as use, so voice_guard's rest does not
+    stop the model again for idle_minutes(). `prime()` (a small request that reads a prompt start into the server's cache,
+    e.g. coding_agent.prime) runs once it is up; `key` keeps one pending call per kind; `done()` after. Only the llama-server
+    backend (Ollama's model loads with its first request as before); never in a game (llama_server.hold)."""
+    if not llama() or llama_server.hold["on"]:
+        return
+    with _lock:
+        _state["answered"] = time.monotonic()
+    with _warm["lock"]:
+        if key in _warm["keys"]:
+            return
+        _warm["keys"].add(key)
+
+    def run():
+        try:
+            with working(background=True):
+                llama_server.ensure()
+                if prime is not None:
+                    prime()
+        except Exception as e:  # a game started, files gone, no RAM: the first real request tries again and says so
+            print(f"Local model: warm-up failed: {type(e).__name__}: {e}")
+        finally:
+            _warm["keys"].discard(key)
+            if done is not None:
+                try:
+                    done()
+                except Exception:
+                    pass
+
+    threading.Thread(target=run, daemon=True).start()
 
 
 def unload(name=None):

@@ -40,6 +40,8 @@ from datetime import datetime
 
 import psutil
 
+import coding_server
+import hud
 import llama_server
 import local_llm
 import npu
@@ -131,7 +133,12 @@ def step(state, reading, now, plugged, ours_busy, ours_mb, preload=True, need=No
 
     room = MEMORY_ROOM * reading.mem_total - (reading.mem_used - ours_mb)
     need = need_mb() if need is None else need
-    calm = not others_busy and reading.temp < temp_limit - COOL_MARGIN and room >= need
+    # Nothing left to load (what is wanted ahead is loaded already) needs no room: the 35B alone is 6.8 GB of the 8 GB card,
+    # so with the desktop's ~0.8 GB it never fits under MEMORY_ROOM, and after a restart with the server still up the mode
+    # stayed "idle" for good: the wake microphone never opened and the rest (only in "ready") never freed the card
+    # (2026-11-17, "Hey Umay" dead after two restarts)
+    fits = need <= ours_mb or room >= need
+    calm = not others_busy and reading.temp < temp_limit - COOL_MARGIN and fits
     if not calm:
         state.calm_since = None
     else:
@@ -231,7 +238,11 @@ def _log(text):
 def apply(mode, reading=None):
     """Puts the workers in line with `mode` (`reading`: the GPU reading it came from)."""
     voice.gaming["on"] = mode == "game"
+    hud.game(mode == "game")   # the vitals panel says "GAME MODE"
     llama_server.hold["on"] = mode == "game"   # nothing may start the big model again mid-game (llama_server.ensure)
+    if mode == "game" and coding_server.on_gpu():   # the coding model's server leaves the card, even mid-task: the game first
+        coding_server.stop(force=True)               # (coding mode goes on from RAM alone: coding_server.ensure, -ngl 0)
+        _log(f"game: the coding model's server is stopped on the card ({reading})")
     asleep = mode == "ready" and local_llm.on() and local_llm.dormant()
     keep = mode == "ready" and not asleep
     voice.local_tts.keep_loaded = keep
@@ -259,6 +270,8 @@ def apply(mode, reading=None):
         voice.voice_pack.stop()
     elif asleep:
         _rest()
+    elif mode == "ready" and coding_server.on_gpu():
+        pass    # the card is the coding model's (6.7 GB): nothing is loaded ahead beside it; a reply stops an idle one
     elif mode == "ready":
         for worker, on in ((voice.local_stt, voice.stt_on() and not npu.asr_ready()),
                            (voice.local_tts, voice.tts_on())):
@@ -322,7 +335,7 @@ def _loop():
             before = _state.mode
             reading = _make_room(_read_gpu())
             plugged = _plugged()
-            llm_mb = local_llm.vram_mb() if local_llm.on() else 0
+            llm_mb = (local_llm.vram_mb() if local_llm.on() else 0) + coding_server.vram_mb()   # the coding model is ours
             memory = local_llm.memory_model()
             ours = _ours_mb(llm_mb) + (local_llm.vram_mb(memory) if memory else 0)  # the memory's model is ours too
             need = need_mb(voice.local_tts.on_gpu(), local_llm.on(), llm_mb, stt=not npu.asr_ready())

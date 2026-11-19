@@ -2,7 +2,8 @@
 the API credit log. No Qt: each read_* returns a plain dict, and the HUD calls them off its UI thread.
 
 - Weather: Open-Meteo (free, no key). The place is UMAY_WEATHER_LOCATION ("Istanbul", or "41.01,28.98"),
-  else where this PC's IP address is; found once and cached by the HUD. Now, 48 hours and 7 days.
+  else where this PC's IP address is, looked up again every 30 minutes (place_for) so it follows the owner to
+  another city. Now, 48 hours and 7 days.
 - Vitals: psutil (CPU, RAM, network, uptime) and nvidia-smi (GPU); the local model's VRAM from Ollama, the RAM
   Umay's models hold (models_ram).
   The detail view adds each core, the programs using most CPU and memory, the GPU's power and clocks.
@@ -78,6 +79,28 @@ def find_place(setting=None):
     if ip.get("status") != "success":
         raise ValueError("couldn't find this PC's place by its IP address")
     return {"name": ip["city"], "country": ip.get("countryCode", ""), "lat": ip["lat"], "lon": ip["lon"]}
+
+
+PLACE_MINUTES = 30      # by IP: the place is looked up again this often (the owner travels)
+PLACE_RETRY_SECONDS = 120
+
+
+def place_for(cached, setting=None, now=None):
+    """The place to read the weather at. A named or coordinate setting (UMAY_WEATHER_LOCATION) is looked up once, and
+    again when the setting changes. By IP it is looked up again every PLACE_MINUTES: it was found once and kept for good,
+    so the panel showed Ankara in London (2026-11-17). A failed lookup keeps the last place and tries again in
+    PLACE_RETRY_SECONDS. The place carries "setting" and "checked" (when it was looked up)."""
+    setting = (setting if setting is not None else os.environ.get("UMAY_WEATHER_LOCATION", "")).strip()
+    now = time.time() if now is None else now
+    same = bool(cached) and cached.get("setting") == setting
+    if same and (setting or now - cached.get("checked", 0) < PLACE_MINUTES * 60):
+        return cached
+    try:
+        return {**find_place(setting), "setting": setting, "checked": now}
+    except Exception:
+        if same:
+            return {**cached, "checked": now - PLACE_MINUTES * 60 + PLACE_RETRY_SECONDS}
+        raise
 
 
 def read_weather(place):

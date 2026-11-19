@@ -216,6 +216,14 @@ def _stopped():
         _turn["stopped"] = True
         return ("Stopped: the user moved the mouse, so they are using the PC. Don't use the mouse or keyboard "
                 "again for this request; tell them where you got to.")
+    import window_tools  # imports system_tools, which imports pc_tools
+
+    if window_tools.uac_showing():
+        # Once Human wants administrator rights: the 4b pressed ctrl+alt+y and then tried to click "send" in the owner's
+        # Claude chat, under a screenshot of the dimmed screen (2026-11-18). Windows' Yes / No runs on a screen closed to
+        # programs: nothing sent from here reaches it, and the owner's other windows are under it.
+        return ("Windows' administrator question (Yes / No) is on the screen. Only the owner can answer it: nothing "
+                "pressed or clicked from here reaches it. Don't use the mouse or keyboard; tell the owner to press Yes.")
     return None
 
 

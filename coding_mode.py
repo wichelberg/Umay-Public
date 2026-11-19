@@ -1,6 +1,7 @@
 """Coding mode, Umay's side: "Activate coding mode" (spoken or written) or Ctrl+F7 opens a window
-(coding_window.py, its own Qt process) where the owner gives the local 35B a coding task in a folder; the 35B works on
-it (coding_agent.py, in coding_workspace.py's sandbox) and the owner keeps the result (tick) or undoes it (cross).
+(coding_window.py, its own Qt process) where the owner gives the local coding model (coding_server.py: TwIL-8B Heretic) a
+coding task in a folder; it works on it (coding_agent.py, in coding_workspace.py's sandbox) and the owner keeps the
+result (tick) or undoes it (cross). Opening the window starts the model's server; closing it (or 10 idle minutes) stops it.
 
 - State lives here, the window is only a view: every change is sent to it as one snapshot ({"state": {...}}), and
   what it sends back are events (task, folder, keep, revert, stop, voice, closed). Closing the window does not stop a
@@ -10,11 +11,11 @@ it (coding_agent.py, in coding_workspace.py's sandbox) and the owner keeps the r
 - One task at a time, and none until the last one is ticked or crossed. The journal is on the disk
   (coding_workspace.Journal): a task pending at a restart is pending when the window opens again.
 - Voice (the window's button, off whenever the window opens): while it is on, what the owner says in a spoken
-  conversation (voice_turn, the voice session's answer callable) is a task for the 35B and never reaches the normal
+  conversation (voice_turn, the voice session's answer callable) is a task for the coding model and never reaches the normal
   Umay; off, voice is the normal Umay and the window is for typing. Telegram, the text box and calls never go to it.
   The voice session stays open meanwhile (voice_session.stay_open) so a long task does not end the conversation.
   A Whisper made-up "Thank you." or a one- or two-word scrap is not a task (looks_like_noise).
-- The 35B's own words are never the report: the window shows what the journal says changed, with a diff.
+- The coding model's own words are never the report: the window shows what the journal says changed, with a diff.
 """
 import json
 import os
@@ -26,6 +27,7 @@ import urllib.parse
 from pathlib import Path
 
 import coding_agent
+import coding_server
 import coding_workspace as cw
 import local_llm
 import paths
@@ -151,12 +153,12 @@ def snapshot():
             "log": _s["log"][-LOG_LINES:], "notice": _s["notice"], "task": (data or {}).get("task", _s["task"]),
             "summary": (data or {}).get("summary", "") if pending else "",
             "changes": [list(c) for c in j.changes()] if pending else [],
-            "diff": j.diff_text() if pending else "", "llama": _llama_ok()}
+            "diff": j.diff_text() if pending else "", "llama": _llama_ok(), "loading": coding_server.warming()}
 
 
 def _llama_ok():
-    import llama_server
-    return llama_server.available()
+    """The coding model (UMAY_CODING_MODEL) and its llama-server.exe are there."""
+    return coding_server.available()
 
 
 def publish():
@@ -192,7 +194,9 @@ def open_window(via="other"):
         if folder is not None and not _s["folder"]:
             _s["folder"] = str(folder)
     if not _llama_ok():
-        _s["notice"] = "The 35B is not set up (UMAY_LLAMA_EXE / UMAY_LLAMA_MODEL): nothing can be written."
+        _s["notice"] = "The coding model is not set up (UMAY_CODING_MODEL / UMAY_CODING_EXE): nothing can be written."
+    else:   # start its server and read the prompt start now, so the first task does not wait for it
+        coding_server.warm(prime=coding_agent.prime, done=publish)
     publish()
     waiting = " The last task is waiting for your tick or cross." if journal().exists() and not _s["busy"] else ""
     return "Coding mode is open, dear. Press the voice button when you want me to listen there." + waiting
@@ -216,6 +220,14 @@ def close_window():
         except subprocess.TimeoutExpired:
             proc.kill()
     _s["proc"] = None
+    _release()
+
+
+def _release():
+    """The window is gone: the coding model's server goes with it unless a task is still running (it then ends by its
+    idle time after the task)."""
+    if not _s["busy"]:
+        coding_server.stop()
 
 
 def _read(proc):
@@ -233,6 +245,7 @@ def _read(proc):
     if _s["proc"] is proc:
         _s["proc"] = None
         _s["voice_on"] = False
+        _release()
 
 
 def handle(event):
@@ -273,7 +286,7 @@ def submit(text, voice=False):
         if not _s["folder"]:
             return "Pick a folder first."
         if not _llama_ok():
-            return "The 35B is not set up (UMAY_LLAMA_EXE / UMAY_LLAMA_MODEL)."
+            return "The coding model is not set up (UMAY_CODING_MODEL / UMAY_CODING_EXE)."
         problem = cw.why_closed(_s["folder"])
         if problem:
             return problem
@@ -291,7 +304,8 @@ def _run(task):
         j.begin(ws.root, task)
         _log(f"Task: {task}")
         agent = coding_agent.Agent(ws, task, on_step=_log, stopped=lambda: _s["stop"])
-        with local_llm.working():   # the whole task, not only each request: the model must not "rest" between two rounds
+        with local_llm.working(background=True):   # the whole task, not each request: no "rest" between two rounds; not a reply, so
+            # it doesn't stop its own server (local_llm.working(background=False) makes an idle coding server give way)
             summary = agent.run()
         data = j.load() or {"files": {}}
         if not data["files"]:
@@ -310,6 +324,8 @@ def _run(task):
             j.set_status("pending", summary)
     finally:
         _s["busy"] = False
+        if not window_open():       # the window was closed while it worked: the model's server goes now (off outside coding mode)
+            coding_server.stop()
         publish()
         _tell_by_voice(summary)
 

@@ -39,6 +39,7 @@ import local_llm
 import memory_cortex
 import npu
 import pc_tools
+import planner_server
 import price_alerts
 import router
 import system_tools
@@ -145,8 +146,7 @@ _place = {}
 
 
 def _weather():
-    if "it" not in _place:
-        _place["it"] = hud_data.find_place()
+    _place["it"] = hud_data.place_for(_place.get("it"))   # looked up again by IP every 30 minutes: the owner travels
     return hud_data.read_weather(_place["it"])
 
 
@@ -220,7 +220,10 @@ def main():
     telegram_listener.start()
     health_monitor.start()
     voice_guard.start()
+    coding_mode.coding_server.cleanup()    # a coding model's server an earlier Umay left (it is off outside coding mode)
+    planner_server.cleanup()               # the same for the CPU planner's (10 GB of private RAM)
     voice_session.stay_open = coding_mode.voice_wanted   # coding mode's voice button keeps the conversation open
+    voice_session.on_listen = local_llm.warm             # "Hey Umay": the big model starts while she listens
     voice_session.setup(answer=lambda chat, text: _voice_answer(chat, text),
                         new_chat=ai_assistant.new_chat,
                         notify=lambda text: pc_tools.fallback_notify(text),  # Telegram, once it's connected
@@ -261,14 +264,14 @@ def main():
             tool_pick.warm(ai_assistant.TOOLS)
     threading.Thread(target=npu_up, name="npu", daemon=True).start()
     # The Memory Cortex reads each finished conversation once; while the owner is away (AFK, companion's
-    # UMAY_AWAY_MINUTES) it reads all the logs again and SELF researches (a small Tavily budget, topics from the
+    # UMAY_AWAY_MINUTES) it reads all the logs again and SELF researches (local_search; a small budget with Tavily, topics from the
     # memory and the newsfeed's follows). Never while she listens, answers or talks, nor during a game, and only
     # once she rests (local_llm.quiet).
     memory_cortex.start(ai_assistant.CHAT_LOG_DIR,
                         can_run=lambda: not voice.gaming["on"] and local_llm.quiet()
                         and not voice_session.active() and not calls.active(),
                         search=lambda q: ai_assistant.tavily_search(q, max_results=3),
-                        remaining=ai_assistant._tavily_remaining,
+                        remaining=ai_assistant.search_remaining,
                         away=lambda: system_tools.idle_seconds() >= companion.away_seconds(),
                         news=hud_feeds.watch_list)
     _start_companion()

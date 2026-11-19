@@ -4,8 +4,8 @@ on stdin ({"state": {...}}, {"log": line}, {"front": true}, {"close": true}) and
 ({"event": "task" | "folder" | "keep" | "revert" | "stop" | "voice" | "ready", ...}). English, like the HUD.
 
 - Top: the folder (Pick folder...), and the voice button. Voice -> coding OFF is the normal Umay listening and this
-  window for typing; ON is every spoken word here going to the 35B and never to the normal Umay.
-- Middle: Progress (what the 35B did, one line an action) and Changes (what really changed, as a diff).
+  window for typing; ON is every spoken word here going to the coding model and never to the normal Umay.
+- Middle: Progress (what the coding model did, one line an action) and Changes (what really changed, as a diff).
 - Bottom: the task box. While a task waits for a decision the box is closed and a tick (keep) and a cross (undo)
   open: no new task until one is pressed.
 - The window ends with Umay (her pid is checked), or with its X.
@@ -101,7 +101,7 @@ def main(parent_pid=0):
     undo = QPushButton("✖  Undo")
     undo.setObjectName("undo")
     task = QLineEdit()
-    task.setPlaceholderText("Describe the task for the 35B...")
+    task.setPlaceholderText("Describe the task for the coding model...")
     go = QPushButton("Send")
     stop = QPushButton("Stop")
 
@@ -144,7 +144,7 @@ def main(parent_pid=0):
                            f'<span style="color:{PINK}">-{r[3]}</span>)</div>' for r in rows)
             changes.setHtml(head + diff_html(state.get("diff") or ""))
             tabs.setCurrentWidget(changes)
-            text = "The 35B says: " + (state.get("summary") or "(no report)")
+            text = "The coding model says: " + (state.get("summary") or "(no report)")
             if not rows:
                 text += "\nNo file differs now."
             summary.setText(text + "\nTry it, then Keep (the change stays) or Undo (everything goes back). "
@@ -161,8 +161,12 @@ def main(parent_pid=0):
         go.setEnabled(not busy and not pending and bool(state.get("folder")))
         stop.setVisible(bool(busy))
         pick.setEnabled(not busy and not pending)
+        if state.get("loading") and not busy:
+            notice.setText((state.get("notice") + "\n" if state.get("notice") else "")
+                           + "The coding model is loading. You can type the task now; it starts as soon as the model is up.")
+            notice.setVisible(True)
         if not state.get("llama", True):
-            notice.setText("The 35B is not set up (UMAY_LLAMA_EXE / UMAY_LLAMA_MODEL).")
+            notice.setText("The coding model is not set up (UMAY_LLAMA_EXE / UMAY_LLAMA_MODEL).")
             notice.setVisible(True)
 
     def got(msg):

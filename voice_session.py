@@ -34,6 +34,10 @@ def stay_open():
     return False
 
 
+def on_listen():
+    """Set by main.py to local_llm.warm: a spoken conversation starts ("Hey Umay"), so the model starts now."""
+
+
 class Session:
     def __init__(self, answer, new_chat, transcribe, notify, activity, glow, log_dir, ended=None,
                  recorder=None, idle_seconds=None, log_suffix="voice", duck=None, write=None):
@@ -84,6 +88,7 @@ class Session:
         self._last_speech = time.monotonic()
         self._log_path = self._log_dir / f"{datetime.now():%Y-%m-%d_%H-%M-%S}_{self._log_suffix}.txt"
         voice.warm_up()  # the voice pack loads (~3 s) while the owner says the first thing
+        on_listen()      # and the big local model, started in the background (main.py: local_llm.warm)
         self._glow.show(self.level, "listen")
         self._listen(turn)
 

@@ -1,8 +1,8 @@
-"""Coding mode's hands: the folder the 35B may work in, the six things it can do there, and the journal that lets
+"""Coding mode's hands: the folder the coding model may work in, the six things it can do there, and the journal that lets
 the owner keep or undo a task. Pure Python, no model and no UI (coding_agent.py drives it).
 
 - Sandbox: one folder, picked by the owner. Every path is resolved (symlinks, case) and must stay inside it.
-  Umay's own folders are closed (the owner's rule, 2026-11-17: the 35B has no authority over her code): her source
+  Umay's own folders are closed (the owner's rule, 2026-11-17: the coding model has no authority over her code): her source
   (found by its files, wherever it is), the running app, her data under %LOCALAPPDATA%\\Umay, and any folder that
   contains one of them (Documents\\Projects). Secrets (.env, keys) are never read or written.
 - Tools: list_dir, read_file (a line range), search (text in files), edit_file (an exact old -> new, once),
@@ -10,11 +10,11 @@ the owner keep or undo a task. Pure Python, no model and no UI (coding_agent.py 
 - Journal: the first time a file is written its original is copied to %LOCALAPPDATA%\\Umay\\coding\\pending\\ (or
   "did not exist" is noted), so the owner can keep the task (tick: the journal is deleted) or undo it (cross: every
   file goes back, created files and the folders made for them go). It is on the disk, so a pending task survives a
-  restart, and no new task starts until it is settled. A file the owner changed after the 35B wrote it is saved to
+  restart, and no new task starts until it is settled. A file the owner changed after the coding model wrote it is saved to
   coding\\rescued\\ before it is put back.
 - run_tests is a fixed runner (python unittest / pytest / npm test, picked from the folder), never a command the
   model wrote, no shell, a timeout. What a test run leaves behind is checked against the tree before it: new files
-  join the journal (the cross removes them); a file it changed that the 35B did not write is only reported.
+  join the journal (the cross removes them); a file it changed that the coding model did not write is only reported.
 """
 import difflib
 import hashlib
@@ -69,7 +69,7 @@ def is_umay_source(folder):
 
 
 def closed_folders():
-    """Folders the 35B may never touch: Umay's source, the running app, her data. Plus UMAY_CODING_CLOSED (;-separated)."""
+    """Folders the coding model may never touch: Umay's source, the running app, her data. Plus UMAY_CODING_CLOSED (;-separated)."""
     found = [paths.app_dir(), Path(__file__).resolve().parent, Path.home() / "Documents" / "Apps" / "Umay",
              Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "Umay", Path.home() / ".claude"]
     found += [Path(p) for p in os.environ.get("UMAY_CODING_CLOSED", "").split(";") if p.strip()]
@@ -77,17 +77,17 @@ def closed_folders():
 
 
 def why_closed(folder):
-    """A sentence when `folder` can't be the 35B's workspace, else None."""
+    """A sentence when `folder` can't be the coding model's workspace, else None."""
     folder = Path(folder)
     if not folder.is_dir():
         return "That is not a folder."
     if is_umay_source(folder):
-        return "That is Umay's own code: the 35B has no authority over it."
+        return "That is Umay's own code: the coding model has no authority over it."
     for closed in closed_folders():
         if _inside(folder, closed):
-            return f"That is inside {closed}, which is closed to the 35B."
+            return f"That is inside {closed}, which is closed to the coding model."
         if _inside(closed, folder):
-            return f"That folder contains {closed}, which is closed to the 35B. Pick a project folder inside it."
+            return f"That folder contains {closed}, which is closed to the coding model. Pick a project folder inside it."
     if len(Path(os.path.realpath(folder)).parts) <= 2:
         return "A drive's root is too wide: pick a project folder."
     return None
@@ -112,7 +112,7 @@ def _write_json(path, data):
 # --- the journal ---------------------------------------------------------------------------------------------
 
 class Journal:
-    """What a task changed, on the disk. State: none (no folder), "working" (the 35B is at it), "pending" (done, the
+    """What a task changed, on the disk. State: none (no folder), "working" (the coding model is at it), "pending" (done, the
     owner has not ticked or crossed it)."""
 
     def __init__(self, base=None):
@@ -249,7 +249,7 @@ class Journal:
         for rel, entry in data["files"].items():
             target = folder / rel
             if target.is_file() and entry["after"] and _hash(target) != entry["after"]:
-                rescue.mkdir(parents=True, exist_ok=True)       # the owner changed it after the 35B did
+                rescue.mkdir(parents=True, exist_ok=True)       # the owner changed it after the coding model did
                 copy = rescue / rel.replace("/", "__").replace("\\", "__")
                 shutil.copy2(target, copy)
                 result["rescued"].append(rel)
@@ -296,19 +296,19 @@ class Workspace:
             raise WorkspaceError("A path is needed.")
         own = self.root.name + "/"
         if rel.lower().startswith(own.lower()) or rel.lower() == own[:-1].lower():
-            # the 35B often starts a path with the folder's own name ("proj/a.py"): that is the root itself, unless a
+            # the coding model often starts a path with the folder's own name ("proj/a.py"): that is the root itself, unless a
             # real subfolder of that name exists (spike 2026-11-17: it made proj4/proj4/utils.py)
             inner = rel[len(own):] or "."
             if not (self.root / rel.split("/")[0]).is_dir() or not (self.root / rel).exists():
                 rel = inner
         target = Path(os.path.realpath(self.root / rel))
         if Path(rel).is_absolute() or not _inside(target, self.root):
-            raise WorkspaceError(f"{rel} is outside the folder; only paths inside it are allowed.")
+            raise WorkspaceError(f"{rel} is outside the folder; only paths inside it are allowed. This is final: do not look for a way around it; finish and say so.")
         if secret(target):
-            raise WorkspaceError(f"{rel} is a secrets file: it is never read or written.")
+            raise WorkspaceError(f"{rel} is a secrets file: it is never read or written. This is final: do not look for a way around it; finish and say so.")
         for closed in closed_folders():
             if _inside(target, closed):
-                raise WorkspaceError(f"{rel} is in a folder that is closed to you.")
+                raise WorkspaceError(f"{rel} is in a folder that is closed to you. This is final: do not look for a way around it; finish and say so.")
         if must_exist and not target.exists():
             raise WorkspaceError(f"{rel} does not exist.")
         return target
@@ -429,8 +429,9 @@ class Workspace:
 
     # tests
 
-    def test_command(self):
-        """The runner for this folder, fixed by what is in it, or None."""
+    def test_command(self, target=None):
+        """The runner for this folder, fixed by what is in it, or None. `target`: one test file (a Path inside the folder)
+        for pytest or unittest; npm test always runs everything."""
         root = self.root
         python = shutil.which("python") or (sys.executable if not getattr(sys, "frozen", False) else None)
         if (root / "package.json").is_file():
@@ -445,12 +446,23 @@ class Workspace:
             has_pytest = any((root / n).is_file() for n in ("pytest.ini", "conftest.py", "tox.ini")) or \
                 "pytest" in _read_text(root / "pyproject.toml")
             if has_pytest:
-                return [python, "-m", "pytest", "-q", "-x"]
+                return [python, "-m", "pytest", "-q", "-x", *([self.rel(target)] if target else [])]
+            if target:     # one file: discover in its folder with its name (cwd stays the root, so the project's modules import)
+                folder = self.rel(target.parent) or "."
+                return [python, "-m", "unittest", "discover", "-s", folder, "-p", target.name]
             return [python, "-m", "unittest", "discover", "-s", "tests" if (root / "tests").is_dir() else "test"]
         return None
 
-    def run_tests(self):
-        command = self.test_command()
+    def run_tests(self, rel=None):
+        """Runs the folder's tests; `rel` = one test file (a model that wants only its own file's result gets it: asked for
+        one, the whole suite answered again and again with an old failure that wasn't its own, 40 rounds, 2026-11-18).
+        "", "." or a folder = all of them."""
+        target = None
+        if (rel or "").strip() not in ("", ".", "./"):
+            path = self.resolve(rel)
+            if path.is_file():
+                target = path
+        command = self.test_command(target)
         if command is None:
             return "This folder has no tests I know how to run (tests/ with unittest or pytest, or npm test)."
         before = self._tree()
@@ -459,7 +471,8 @@ class Workspace:
                                   errors="replace", timeout=TEST_SECONDS, stdin=subprocess.DEVNULL,
                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             output = (done.stdout or "") + (done.stderr or "")
-            head = f"Tests {'passed' if done.returncode == 0 else 'FAILED'} (exit {done.returncode})."
+            head = (f"Tests {'passed' if done.returncode == 0 else 'FAILED'} (exit {done.returncode})"
+                    + (f", only {self.rel(target)}." if target and "npm" not in Path(command[0]).stem.lower() else "."))
         except subprocess.TimeoutExpired as e:
             output = ((e.stdout or b"").decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or ""))
             head = f"Tests stopped after {TEST_SECONDS} s."

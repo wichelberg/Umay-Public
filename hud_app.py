@@ -24,7 +24,7 @@ main thread, and a crash here never takes Umay down.
 
 stdin (from Umay), one JSON object per line: {"state": "idle|listening|thinking|researching|working|
 speaking"}, {"level": 0..1} (her voice while she speaks), {"say": text, "id": n, "seconds": s},
-{"visible": bool}, {"muted": bool} (she isn't listening), {"open": panel, "toggle": bool} (its detail view; "audio":
+{"visible": bool}, {"muted": bool} (she isn't listening), {"game": bool} (game mode: the vitals say so), {"open": panel, "toggle": bool} (its detail view; "audio":
 Ctrl+F3's panel, hud_audio.py), {"balances": {"openrouter", "tavily"}}, {"disk": {"running", "progress"}},
 {"disk_result": {"id", "text", "ok"}}, {"audio": {...}} (the audio panel's state). Its end (Umay closed) ends the HUD.
 stdout (to Umay): {"event": "ready"}, {"event": "click"} (the orb), {"event": "say_click", "id": n},
@@ -677,6 +677,7 @@ def rate(bps):
 class VitalsPanel(Panel):
     NAME, SLOT, SIZE, INDEX, TITLE = "vitals", "top-right", (432, 500), "02", "SYSTEM VITALS"
     cpu = "CPU"
+    game = False   # voice_guard's game mode (Umay's big model is off the card): {"game": bool}
 
     def sub(self):
         if not self.data:
@@ -684,7 +685,9 @@ class VitalsPanel(Panel):
         gpu = self.data.get("gpu")
         hot = self.data["cpu"] > 90 or (gpu and gpu["temp"] >= 85)
         if self.data.get("ram_level", 0) >= 2:   # little RAM free AND pages read back from the disk (pressure.py)
-            return "MEMORY PRESSURE"
+            return "GAME · PRESSURE" if self.game else "MEMORY PRESSURE"
+        if self.game:
+            return "GAME MODE"
         return "UNDER LOAD" if hot else "NOMINAL"
 
     def content(self, p, w, h):
@@ -1294,12 +1297,11 @@ def _every(seconds, read, signal, retry=None):
 
 def _weather_reader(store):
     def read_weather():
-        setting = os.environ.get("UMAY_WEATHER_LOCATION", "").strip()
-        place = store.data.get("place")
-        if not place or place.get("setting") != setting:
-            place = {**hud_data.find_place(setting), "setting": setting}
-            store.data["place"] = place
-            store.save()
+        cached = store.data.get("place")
+        place = hud_data.place_for(cached)
+        store.data["place"] = place
+        if not cached or any(place.get(k) != cached.get(k) for k in ("name", "lat", "lon", "setting")):
+            store.save()      # a new place (another city): kept; the time of a lookup alone is not worth a write
         return hud_data.read_weather(place)
     return read_weather
 
@@ -1498,6 +1500,9 @@ def main(umay_pid=0):
             mic.setVisible(shown["on"] and mic.muted)
             stack()
             notify("audio")
+        if "game" in m:
+            panels["vitals"].game = bool(m["game"])
+            panels["vitals"].update()
         if "refresh" in m and shared.wake.get(str(m["refresh"])) is not None:  # who is followed changed
             shared.wake[str(m["refresh"])].set()
         if "balances" in m:

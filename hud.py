@@ -28,7 +28,8 @@ RESTARTS = 3
 RESTART_SECONDS = 5
 
 _state = {"proc": None, "on_click": None, "visible": True, "muted": False, "activity": None, "anchor": None,
-          "says": {}, "next_id": 0, "restarts": 0, "stopping": False, "handlers": {}}
+          "says": {}, "next_id": 0, "restarts": 0, "stopping": False, "handlers": {},
+          "game": False}
 _lock = threading.Lock()
 
 
@@ -79,6 +80,8 @@ def start(on_click=None, language=None):
         _send({"visible": False})
     if _state["muted"]:  # a HUD that was restarted
         _send({"muted": True})
+    if _state["game"]:
+        _send({"game": True})
 
 
 def _read(proc):
@@ -126,6 +129,15 @@ def on(name, handler):
 def tell(obj):
     """Thread-safe: a message to the HUD (an answer to one of its events)."""
     _send(obj)
+
+
+def game(on):
+    """Thread-safe: voice_guard's game mode started / ended; the vitals panel says so ("GAME"). Sent on a change only."""
+    on = bool(on)
+    if _state["game"] == on:
+        return
+    _state["game"] = on
+    _send({"game": on})
 
 
 def open_detail(name):

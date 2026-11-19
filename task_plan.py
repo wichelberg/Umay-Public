@@ -110,6 +110,13 @@ Rules:
 Umay's tools (name(parameters): what it does):
 """
 
+# Added to the request when the LOCAL planner (gpt-oss-20b Heretic) writes the plan. Without it (2026-11-18, 24 of the owner's
+# requests) it wrote one step whose `do` was only the tool's name, tool-call syntax instead of a sentence, and in one plan
+# the owner's answer before anything had been searched.
+LOCAL_HINT = ("\n\n(Write every step's `do` as a plain, full sentence for the small model, with the concrete words to search "
+              "for, type or say: no tool-call syntax, never just a tool name. Put the tools in `tools`. 2 to 4 steps. The last "
+              "step has no tools: it tells the owner what the earlier steps found; never write that result in advance.)")
+
 SCHEMA = {
     "type": "object", "required": ["steps", "ask_user"],
     "properties": {
@@ -245,9 +252,14 @@ def make(request, recent, tools, today):
         prompt += f"The conversation just before (for context):\n{recent}\n\n"
     prompt += f"Request from the owner: {request}"
     names = {t["function"]["name"] for t in tools}
-    schema = with_tool_enum(SCHEMA, names) if heavy_model.is_local("plan") else SCHEMA
-    plan = heavy_model.ask(prompt, "plan", schema=schema, system=PLANNER + catalog(tools))
-    return check(plan, names)
+    local = heavy_model.is_local("plan")
+    schema = with_tool_enum(SCHEMA, names) if local else SCHEMA
+    plan = check(heavy_model.ask(prompt + (LOCAL_HINT if local else ""), "plan", schema=schema,
+                                 system=PLANNER + catalog(tools)), names)
+    if plan is None and local and heavy_model.setting() is not None:
+        # the local planner gave none that can be used (it was off, slow or wrote no steps): Haiku writes it, as before
+        plan = check(heavy_model.ask(prompt, "plan", schema=SCHEMA, system=PLANNER + catalog(tools), local=False), names)
+    return plan
 
 
 def step_tools(step, names, last=False):

@@ -52,7 +52,7 @@ import pc_tools
 PORT = 47821  # must match PORT in the extension's background.js
 EXTENSION_ID = "jkjagcjnhockldeegpcpepaehhepdehp"  # from the "key" in the extension's manifest
 EXTENSION_DIR = Path.home() / "Documents" / "Projects" / "Web_ControlExtention"
-MIN_EXTENSION_VERSION = (1, 3)  # 1.2 added "video"; 1.3 back/forward/zoom/tab extras, paged reading, forms
+MIN_EXTENSION_VERSION = (1, 4)  # 1.2 added "video"; 1.3 back/forward/zoom/tab extras, paged reading, forms; 1.4 video play / pause + `fullscreen` in its state
 OPERA_PROFILE = Path(os.environ.get("APPDATA", "")) / "Opera Software" / "Opera GX Stable" / "Default"
 WATCH_SECONDS = 30
 CONNECT_GRACE_SECONDS = 2 * 60  # Opera running this long without the extension connecting: a problem
@@ -750,7 +750,52 @@ def _upload(tab, ref, path):
 
 # --- the video in a tab (not asked: the owner's choice, 2026-10-20) ---------------------------
 
-VIDEO_ACTIONS = ("state", "loop", "loop_on", "loop_off", "volume", "mute", "unmute", "fullscreen")
+VIDEO_ACTIONS = ("state", "play", "pause", "loop", "loop_on", "loop_off", "volume", "mute", "unmute", "fullscreen")
+PLAY_WAIT_SECONDS = 0.7   # YouTube's player answers play / pause a moment after the call
+
+
+def _page_state(tab_id):
+    """The video's state as the page says it (the extension, 1.4+ adds `fullscreen`), or {} when it can't tell."""
+    try:
+        return _video_tab(tab_id, "state", None, None)[1]
+    except ToolError:
+        return {}
+
+
+def _fullscreen_video(tab_id):
+    """YouTube's "f" for the video, checked against the page itself (document.fullscreenElement) when the extension is
+    1.4+: the window's size can't tell a video in fullscreen from a maximized window (the owner's second monitor, 2026-11-17).
+    An older extension: the window check alone (browser_tools.press_fullscreen)."""
+    import browser_tools  # a real key press: browsers allow fullscreen only after one
+
+    before = _page_state(tab_id).get("fullscreen")
+    if before is True:
+        return "The video is already fullscreen (the page says so), so nothing was pressed (the f key would leave it)."
+    if before is None:
+        return browser_tools.press_fullscreen()
+    pressed = browser_tools.press_fullscreen(trust_window=False)
+    after = _page_state(tab_id).get("fullscreen")
+    if after is True:
+        return "The video is fullscreen now (the page confirms it)."
+    if after is False:
+        return ("NOT done: I pressed f but the page says the video is not fullscreen. The key most likely went to the "
+                "address bar or another field instead of the video. Tell the user plainly; they can click the video "
+                "once and ask again.")
+    return pressed
+
+
+def _play_pause(action, tab_id):
+    """Plays or pauses the browser's video itself and reads the page back: media_key goes to whichever app Windows
+    counts as the current player, and with Spotify open that was Spotify (2026-11-17)."""
+    tab, _ = _video_tab(tab_id, action, None, None)
+    time.sleep(PLAY_WAIT_SECONDS)
+    state = _call("video", tab=tab["id"], action="state", on=None, volume=None)
+    want_paused = action == "pause"
+    line = f"{_video_line(state)} (tab [{tab['id']}] {_short(tab['title'], 80)})"
+    if state.get("paused") == want_paused:
+        return ("Paused. " if want_paused else "Playing. ") + line
+    return (f"NOT done: I asked the video to {action} but it still {'plays' if want_paused else 'is paused'}. "
+            f"{line}. Tell the user plainly; they can click the video once and ask again.")
 
 
 def control_video(action: str, percent: int = None, tab_id: int = None) -> str:
@@ -758,13 +803,13 @@ def control_video(action: str, percent: int = None, tab_id: int = None) -> str:
         if action not in VIDEO_ACTIONS:
             raise ToolError(f"Unknown action. Use one of: {', '.join(VIDEO_ACTIONS)}.")
         if action == "fullscreen":
-            import browser_tools  # a real key press: browsers allow fullscreen only after one
-
-            return browser_tools.press_fullscreen()
+            return _fullscreen_video(tab_id)
         version = _link["version"]
         if _link["ws"] is not None and version is not None and _version(version) < MIN_EXTENSION_VERSION:
             raise ToolError(problem() or "The Web Control extension is too old for video control: reload it in "
                                          "opera://extensions.")
+        if action in ("play", "pause"):
+            return _play_pause(action, tab_id)
         command, on = {"loop": ("loop", None), "loop_on": ("loop", True), "loop_off": ("loop", False),
                        "mute": ("mute", True), "unmute": ("mute", False), "state": ("state", None),
                        "volume": ("volume", None)}[action]
@@ -888,8 +933,9 @@ TOOLS = [
 TOOLS.append(_tool(
     "control_video",
     "The video in an Opera GX tab (YouTube or any site); not asked first: loop (loop_on / loop_off set it), "
-    "volume (the video's own, `percent`; the PC's is set_volume), mute / unmute, state, fullscreen. Without "
-    "tab_id: the tab in front, else one playing sound. To pause/resume use media_key; to close the tab use web_tabs.",
+    "volume (the video's own, `percent`; the PC's is set_volume), mute / unmute, state, fullscreen, and play / pause "
+    "(pause or resume a YouTube or browser video: always these, never media_key, which goes to Spotify when it is open). "
+    "Without tab_id: the tab in front, else one playing sound. To close the tab use web_tabs.",
     {
         "action": {"type": "string", "enum": list(VIDEO_ACTIONS)},
         "percent": {"type": "integer", "description": "For 'volume': 0-100."},

@@ -14,6 +14,7 @@ $python = @(if (Get-Command python -ErrorAction SilentlyContinue) { "python" } e
     --hidden-import secrets --hidden-import argparse --hidden-import urllib.request `
     --hidden-import send2trash --hidden-import yt_dlp --hidden-import websockets.sync.server `
     --collect-submodules holidays --collect-data holidays `
+    --collect-submodules ddgs --collect-all trafilatura --collect-all justext --collect-all courlan --collect-all htmldate --collect-all dateparser `
     main.py
 
 Write-Host "Built dist\Umay.exe. Put .env (and optionally personality.md, config.json) next to it."

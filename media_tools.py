@@ -67,8 +67,9 @@ TOOLS = [
         "media_key",
         "Presses a keyboard media key: play_pause (pause/resume whatever is playing, e.g. YouTube or Spotify), "
         "next (the next track; never for skipping seconds inside a song), previous, stop. Works without the "
-        "player being in front. Prefer this for pausing/resuming "
-        "YouTube or an unnamed player; for Spotify use the spotify tool (it also checks the result).",
+        "player being in front. It goes to whatever Windows counts as the current player, which is Spotify when "
+        "Spotify is open: for a video in the browser use control_video (play / pause), for Spotify the spotify tool "
+        "(both check the result). This only for an unnamed player.",
         {"action": {"type": "string", "enum": list(MEDIA_KEYS)}},
         ["action"],
     ),

@@ -466,11 +466,39 @@ def _steam_folder(app_id):
     return game["library"] / "steamapps" / "common" / game["installdir"] if game and game["installdir"] else None
 
 
+def _steam_id_of_exe(text):
+    """"steam://rungameid/<id>" when `text` is the .exe of an installed Steam game (the model often guesses that
+    path instead of calling find_applications), else None. The folder needn't be inside the allowed ones."""
+    import steam_tools  # imports pc_tools itself
+
+    text = text.strip().strip('"')
+    if not text.lower().endswith(".exe"):
+        return None
+    try:
+        path = Path(os.path.expandvars(text))
+        if not path.is_absolute():
+            return None
+        path = path.resolve()
+        for game in steam_tools.installed_games():
+            if game["installdir"] and path.is_relative_to(game["library"] / "steamapps" / "common" / game["installdir"]):
+                return f"steam://rungameid/{game['appid']}"
+    except (steam_tools.ToolError, OSError, ValueError):
+        pass
+    return None
+
+
 def launch_application(app_id: str) -> str:
     def run():
         import window_tools  # imports system_tools, which imports this module
 
-        exe = _exe_file(app_id)
+        steam_id = _steam_id_of_exe(app_id)  # Baldur's Gate 3's .exe path was refused: Steam's folder isn't allowed
+        if steam_id:
+            return launch_application(steam_id)
+        try:
+            exe = _exe_file(app_id)
+        except ToolError as e:
+            raise ToolError(f"{e} To start an installed app or a Steam game, call find_applications and use its "
+                            "app_id.") from None
         apps = {} if exe else _installed_apps()
         if not exe and app_id not in apps:
             return ("Unknown app_id. Call find_applications first and use an app_id from its results, or give the "

@@ -323,20 +323,47 @@ class _MonitorInfo(ctypes.Structure):
     _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", _Rect), ("rcWork", _Rect), ("dwFlags", wintypes.DWORD)]
 
 
+_private = {}
+
+
+def _monitor_api():
+    """A user32 of this module's own (ctypes.WinDLL makes a new library object, so its functions and their argtypes are
+    not shared with ctypes.windll.user32, which every other module uses)."""
+    if "user32" not in _private:
+        api = ctypes.WinDLL("user32")
+        api.MonitorFromWindow.restype = wintypes.HANDLE
+        api.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+        api.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_MonitorInfo)]
+        api.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+        api.GetWindowLongW.restype = ctypes.c_long
+        _private["user32"] = api
+    return _private["user32"]
+
+
+GWL_STYLE, WS_CAPTION = -16, 0x00C00000   # Chromium takes WS_CAPTION (and WS_THICKFRAME) off a fullscreen window
+
+
 def _fullscreen(hwnd):
-    """True when the window's visible frame covers its whole monitor (taskbar area included: a maximized window stops at
-    the taskbar), False when it doesn't, None when Windows can't say."""
+    """True when the window is fullscreen: its visible frame covers its whole monitor AND it has no title bar style. The
+    frame alone isn't enough: a maximized window covers a monitor whose taskbar hides itself, and the owner's second
+    monitor does, so "make the video fullscreen" was answered "already fullscreen" four times with the video in page
+    mode (2026-11-17; measured on that Opera: maximized 0x17CF0000 with WS_CAPTION, fullscreen 0x170B0000 without it).
+    False when it doesn't, None when Windows can't say."""
     try:
         frame = _Rect()
         if ctypes.windll.dwmapi.DwmGetWindowAttribute(wintypes.HWND(hwnd), 9, ctypes.byref(frame), ctypes.sizeof(frame)) != 0:
             return None   # 9 = DWMWA_EXTENDED_FRAME_BOUNDS
-        _user32.MonitorFromWindow.restype = wintypes.HANDLE
-        _user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
-        _user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_MonitorInfo)]
-        monitor = _user32.MonitorFromWindow(wintypes.HWND(hwnd), 2)   # MONITOR_DEFAULTTONEAREST
+        # Our own copy of user32: ctypes.windll.user32 is one object for the whole process, and setting argtypes on its
+        # functions with this module's struct broke hud_windows.monitor_at (its own MONITORINFO) for every screenshot-taking
+        # tool until Umay restarted: "Press F" pressed the key, then screen_tools.refresh raised and she said it failed
+        # (2026-11-17)
+        monitor_api = _monitor_api()
+        if monitor_api.GetWindowLongW(wintypes.HWND(hwnd), GWL_STYLE) & WS_CAPTION == WS_CAPTION:
+            return False      # a normal window with its title bar, however large
+        monitor = monitor_api.MonitorFromWindow(wintypes.HWND(hwnd), 2)   # MONITOR_DEFAULTTONEAREST
         info = _MonitorInfo()
         info.cbSize = ctypes.sizeof(info)
-        if not monitor or not _user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+        if not monitor or not monitor_api.GetMonitorInfoW(monitor, ctypes.byref(info)):
             return None
         m = info.rcMonitor
         return all(abs(a - b) <= 2 for a, b in ((frame.left, m.left), (frame.top, m.top), (frame.right, m.right),
@@ -345,13 +372,14 @@ def _fullscreen(hwnd):
         return None
 
 
-def press_fullscreen() -> str:
+def press_fullscreen(trust_window=True) -> str:
     """YouTube's "f" in Opera GX's current tab (web_control.control_video's 'fullscreen'), and whether it worked: the window
     covers its monitor afterwards. Before, the key was pressed blind and the result reported as done (2026-11-12 and 11-15:
-    a search bar opened instead, and Umay said fullscreen was on)."""
+    a search bar opened instead, and Umay said fullscreen was on). trust_window=False: the caller asks the page itself
+    (extension 1.4), so the window is not looked at before the key and the answer is only "pressed"."""
     def run():
         hwnd = _focused_opera()
-        before = _fullscreen(hwnd)
+        before = _fullscreen(hwnd) if trust_window else None
         if before:
             return "Opera GX is already fullscreen, so nothing was pressed (the f key would leave it)."
         if _focus_state["alt"]:

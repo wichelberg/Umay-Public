@@ -21,6 +21,7 @@ claude is missing, offline or fails, ask() returns None and the caller does with
 Every call is logged to %LOCALAPPDATA%\\Umay\\heavy_model.log with its time, list price and the plan usage
 Claude Code reports (5-hour and weekly window).
 """
+import contextlib
 import json
 import os
 import subprocess
@@ -35,6 +36,7 @@ import requests
 import claude_bridge
 import llama_server
 import local_llm
+import planner_server
 
 DEFAULT = "claude-code:haiku:low"
 LOCAL_PURPOSES = ("plan", "fix", "check")   # what UMAY_HEAVY_LOCAL may hand to the local big model
@@ -57,7 +59,7 @@ def setting():
 
 
 def on():
-    return setting() is not None or (bool(local_purposes()) and local_llm.llama())
+    return setting() is not None or (bool(local_purposes()) and (local_llm.llama() or planner_server.available()))
 
 
 def local_purposes():
@@ -69,8 +71,16 @@ def local_purposes():
     return tuple(p for p in LOCAL_PURPOSES if p in wanted)
 
 
+def _planner_only():
+    """The local answers come from planner_server (the CPU planner, UMAY_PLANNER_MODEL) and not from the big-model backend:
+    it writes plans only; fixes and checks stay with Haiku. Never in a game (the server is off then)."""
+    return not local_llm.llama() and planner_server.available() and not llama_server.hold["on"]
+
+
 def is_local(purpose, image=None):
-    return image is None and purpose in local_purposes() and local_llm.llama()
+    if image is not None or purpose not in local_purposes():
+        return False
+    return local_llm.llama() or (_planner_only() and purpose == "plan")
 
 
 def max_calls():
@@ -149,31 +159,33 @@ def _ask_local(prompt, purpose, schema, system):
     nothing leaves the PC."""
     _local.calls = calls_used() + 1
     started = time.monotonic()
+    own = not local_llm.llama()      # the CPU planner's own server (planner_server), not the big-model backend's
+    server = planner_server if own else llama_server
     # The planner's system prompt + tool catalog is ~3,100 tokens: its saved state goes back into the server after a restart
     prefix = system if len(system) >= llama_server.PREFIX_MIN_CHARS else ""
     try:
-        with local_llm.working():
+        with (contextlib.nullcontext() if own else local_llm.working()):   # the CPU planner takes nothing the talker needs
             if prefix:
-                llama_server.ensure()               # a stopped server starts first: there is a slot to restore into
-                llama_server.restore_prefix(prefix)
+                server.ensure()                     # a stopped server starts first: there is a slot to restore into
+                server.restore_prefix(prefix)
             if schema is not None:
-                answer = llama_server.ask_json(prompt, schema, system=system, timeout=TIMEOUT_S * 3)
+                answer = server.ask_json(prompt, schema, system=system, timeout=TIMEOUT_S * (1.25 if own else 3))
             else:
-                answer = llama_server.ask_text(prompt, system=system, timeout=TIMEOUT_S * 3) or None
+                answer = server.ask_text(prompt, system=system, timeout=TIMEOUT_S * 3) or None
     except (requests.RequestException, ValueError, KeyError, IndexError) as e:
         _log(purpose, time.monotonic() - started, {}, f"LOCAL FAILED {type(e).__name__}: {e}"[:200])
         return None
     if prefix and answer is not None:
-        llama_server.save_prefix(prefix)
-    _log(purpose, time.monotonic() - started, {}, "local")
+        server.save_prefix(prefix)
+    _log(purpose, time.monotonic() - started, {}, "local" + (" planner-cpu" if own else ""))
     return answer
 
 
-def ask(prompt, purpose, schema=None, image=None, system=SYSTEM):
+def ask(prompt, purpose, schema=None, image=None, system=SYSTEM, local=True):
     """One question to the heavy model. `image`: JPEG bytes it should look at (it reads them from a file named
     in the prompt's `{image}`). Returns the structured answer (with `schema`) or the text; None when there is
     no heavy model, the request's budget is used up, or the call fails."""
-    if is_local(purpose, image) and calls_used() < max_calls():
+    if local and is_local(purpose, image) and calls_used() < max_calls():
         answer = _ask_local(prompt, purpose, schema, system)
         if answer is not None:
             return answer
