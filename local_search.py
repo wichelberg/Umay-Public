@@ -14,6 +14,7 @@ ordinary answers (medicine, security, adult life) and the owner wants every ques
 """
 import concurrent.futures
 import ipaddress
+import re
 import socket
 import time
 from datetime import datetime, timezone
@@ -94,6 +95,18 @@ def search(query, max_results=5, topic=None, time_range=None):
             if found:
                 return found
     return []
+
+
+YEAR = re.compile(r"\b(?:19|20)\d\d\b")
+
+
+def unsaid_years(query, *sources):
+    """`query` without a year nobody wrote. The model put one in out of habit: "When did this meeting happen?" was
+    searched as "date of Trump Xi and Putin meeting 2016", the search brought the 2018 Helsinki summit and she answered
+    with it as if it were the meeting (2026-11-19). A year the owner, the conversation or a result named stays."""
+    said = set(YEAR.findall(" ".join(s or "" for s in sources)))
+    kept = re.sub(r"\s{2,}", " ", YEAR.sub(lambda m: m.group(0) if m.group(0) in said else "", query)).strip()
+    return kept or query
 
 
 def public_address(url):

@@ -21,3 +21,4 @@ winrt-Windows.Foundation
 winrt-Windows.Foundation.Collections
 ddgs
 trafilatura
+pypdf

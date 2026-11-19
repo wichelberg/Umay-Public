@@ -256,6 +256,9 @@ def main():
     # game, and only once she rests (local_llm.quiet: no reply for 5 minutes), not right after a talk.
     conversation_memory.start(ai_assistant.CHAT_LOG_DIR,
                               can_run=lambda: not voice.gaming["on"] and local_llm.quiet())
+    # A research job a restart cut off (research.py: its plan and the pages read are on the disk) goes on a minute later,
+    # once the network and the rest are up. Not in a game: `_wait_free` waits there anyway.
+    threading.Timer(60, ai_assistant.research.resume).start()
     # The NPU's models (npu.py: the decision model the memory asks its yes/no questions). Not there, or it fails
     # to start: everything goes to the local model as before.
     def npu_up():

@@ -275,6 +275,13 @@ def restore_prefix(system):
         return _slot_action("restore", _prefix_name(system))
 
 
+def forget_restore():
+    """Lets `restore_prefix` act once more in this server process: another user of the server (research.py) has taken the
+    slot with its own prompts, so the next plan's saved prefix has to go back in."""
+    with _lock:
+        _state["restored_pid"] = 0
+
+
 def save_prefix(system):
     """Saves the slot's state under this prompt's name, once. Older states beyond PREFIX_KEEP go."""
     if len(system) < PREFIX_MIN_CHARS:

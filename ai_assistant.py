@@ -42,8 +42,10 @@ import markets_follow
 import media_tools
 import news_follow
 import pc_tools
+import pdf_study
 import price_alerts
 import reminder_tools
+import research
 import router
 import screen_tools
 import sleep_mode
@@ -118,9 +120,10 @@ def _load_personality():
 # paragraphs for everything). Not in personality.md: that file is also the owner's Telegram persona for Claude.
 STYLE = (
     "How you talk: like Jarvis, a composed and discreet assistant, but warm. You are speaking to the owner "
-    "directly: say \"you\", never \"the owner\" or \"the user\". Short, plain, goal-focused "
-    "lines: usually one sentence, two or three only when the content needs it; longer only when the user asks "
-    "for an explanation or details. Lead with the result. No filler: don't restate the request, don't describe "
+    "directly: say \"you\", never \"the owner\" or \"the user\". Plain and goal-focused, but natural, like a "
+    "person talking: one short line once a command is done, while a question, an idea or a remark gets a real "
+    "answer of a few sentences (two to five), more when the user asks for an explanation or details. Lead with "
+    "the result. No filler: don't restate the request, don't describe "
     "the screen or a tool's output unless asked, no \"Let me know if you need anything else\", no \"I hope\", "
     "no \"Great question\". Call the user \"dear\" the way Jarvis says \"sir\" (never \"sir\"): often, at most "
     "once in a reply. After a tool did what was asked, a few words are enough (\"Done, dear.\"); when it "
@@ -185,7 +188,9 @@ PICKED_HINTS = (
     "you to do, say plainly that you couldn't do it. What you know about the user is only what this conversation "
     "and the notes in it say: asked something about them that isn't there, say you don't know it yet, never "
     "guess. The same for the world: the weather, the news, a price, what someone did lately are only known when "
-    "a result holds them; without one, say you haven't looked it up. Don't name your tools or their settings. No "
+    "a result holds them; without one, say you haven't looked it up. A result about something else than what was "
+    "asked (another year, other people, another place) is not the answer: say the search didn't find it, never "
+    "give it as if it were. Don't name your tools or their settings. No "
     "emoji. You can't send mail: you open a draft and the user "
     "presses Send. You have no way to save to memory yourself: never say you added, saved, noted or recorded "
     "something. Say instead that you will learn it when the conversation ends (saying goodbye makes it now)."
@@ -595,7 +600,8 @@ def _with_reminder(mode, messages):
     in the history), for the local model the clock (not in its system prompt: see _system_prompt) and
     LANGUAGE_REMINDER, which stays last."""
     clock = f"\n\n({_clock()})" if mode["local"] else ""
-    reminder = (PICKED_REMINDER if mode.get("picks") else LANGUAGE_REMINDER) if mode["local"] else ""
+    reminder = mode.get("reminder") or (PICKED_REMINDER if mode.get("picks") else LANGUAGE_REMINDER) \
+        if mode["local"] else ""
     extra = clock + getattr(_memory, "note", "") + reminder
     if not extra:
         return messages
@@ -609,13 +615,35 @@ def _with_reminder(mode, messages):
 
 # After the last result of a turn. Short on purpose: a longer one ("Now tell the user ... a sentence or two ...") came
 # back in the answer as "(Note: I kept my response short and to the point, as per the guidelines.)" (Stheno, 2026-11-11).
-ANSWER_NOW = "\n\n(Reply in English: one or two short sentences. No greeting, no offer of more help.)"
+ANSWER_NOW = ("\n\n(Reply in English: as long as the answer needs, usually two to four short sentences, one when it "
+              "is only \"done\". No greeting, no closing question, no offer of more help. Don't write the date or "
+              "time unless asked.)")
+# For a message that only thanks or says goodbye. With ANSWER_NOW's "no greeting, no offer" the roleplay model had
+# nothing it could say and told the news again: "The meeting in Shenzhen continues." for "Thank you!" (2026-11-19;
+# real Stheno, thanks after five kinds of answer: 2 of 18 repeated an earlier answer, with this 0 of 18).
+SMALL_REMINDER = ("\n\n(Reply in English: one short, warm line to what they just said. Don't bring up or repeat "
+                  "anything from earlier answers. No offer of more help.)")
 # The same words after the owner's message, where LANGUAGE_REMINDER goes for the other modes. Without them the
 # roleplay model opened every reply with "Hello <name>," and closed with "Is there anything else I can help with
 # today?", whatever STYLE says a thousand tokens earlier (2026-11-11).
 PICKED_REMINDER = ANSWER_NOW
 # A roleplay model's out-of-character note at the end of an answer: never the owner's to read.
 ASIDE = re.compile(r"\s*[(\[](?:note|ooc|p\.?s\.?)\b[^()\[\]]*[)\]]\s*\Z", re.IGNORECASE)
+# With room to talk (ANSWER_NOW, 2026-11-19) the model sometimes ends on an offer: "Let me know if there's anything I
+# can do", "I'll be here if you need to talk" (5 of 28 on the real Stheno; the rule against it is not always heeded).
+OFFER_END = re.compile(
+    r"(?:anything else|let me know|how (?:can|may) i help|if you (?:need|want) (?:anything|any |help|me|someone|to "
+    r"talk|comfort|more)|feel free|here (?:for you|to help)|happy to help|i'll be (?:here|happy|glad))", re.IGNORECASE)
+
+
+def _without_offer(text):
+    """`text` without a last sentence that only offers more help, when something else stands before it."""
+    parts = re.split(r"(?<=[.!?])\s+", text.strip())
+    if len(parts) > 1 and OFFER_END.search(parts[-1]):
+        return " ".join(parts[:-1])
+    return text
+
+
 RESULT_OPEN = "[Result of {name}]\n"
 NO_PICTURE = "[A screenshot was here; you can't see pictures. Go by what the results say about it.]"
 
@@ -840,7 +868,10 @@ def _mode_for(chat, tools):
     without TOOL_HINTS, which are about tools. With them, and no tool list after them, the 4b answered a goodbye
     with their memory sentence: "it will be saved when we say goodnight" (real 4b, 2026-11-10)."""
     mode = MODES[chat["mode"]]
-    return {**mode, "system": f"{_load_personality()}\n\n{SMALL_HINTS}"} if tools == [] else mode
+    if tools != []:
+        return mode
+    return {**mode, "system": f"{_load_personality()}\n\n{SMALL_HINTS}",
+            **({"reminder": SMALL_REMINDER} if mode.get("picks") else {})}
 
 
 def _send_message(chat, user_text, source="other"):
@@ -895,6 +926,12 @@ def _send_message(chat, user_text, source="other"):
         return answer
     if source in ("voice", "box") and coding_mode.asked(user_text):  # "activate coding mode": the coding window
         answer = coding_mode.open_window(source)
+        messages.append({"role": "assistant", "content": answer})
+        return answer
+    files = None if chat.get("pending_plan") else pdf_study.asked(user_text)   # "<folder or file.pdf> çalış": pdf_study.py, before the web research
+    topic = None if (files or chat.get("pending_plan")) else research.asked(user_text)
+    answer = (pdf_study.start(files, source) if files else research.start(topic, source) if topic else research.command(user_text))
+    if answer is not None:  # "research <topic>": a job of its own (research.py), the answer is a report file, not a reply
         messages.append({"role": "assistant", "content": answer})
         return answer
     if memory_editor.asked(user_text):  # "open the memory editor": a window on the PC, no model needed
@@ -1038,7 +1075,8 @@ def _show_images(messages, images):
 ARGS_SYSTEM = ("You fill in the arguments of one tool call for Umay, a desktop assistant on the owner's Windows PC. "
                "The tool is already chosen. Answer with one JSON object: the arguments, taken from the owner's "
                "message, the conversation and the results so far. Leave out an optional argument nothing speaks "
-               "about. Never make up a path, a name, an address or a time: use what is written, as it is written.")
+               "about. Never make up a path, a name, an address, a time or a year: use what is written, as it is written. "
+               "A search for something recent names no year unless the message does.")
 ARGS_TOKENS = 700        # write_file's text and a mail's body are arguments too
 ARGS_RESULT_CHARS = 1500  # of each earlier answer of the turn: the tab or the file the next call names is in it
 BEFORE_CHARS = 900
@@ -1100,7 +1138,14 @@ def _arguments(mode, tool, request, before, done, run):
         raise ValueError(f"no arguments in the answer: {text[:120]!r}") from None
     if not isinstance(args, dict):
         raise ValueError(f"the arguments aren't an object: {text[:120]!r}")
-    return {k: v for k, v in args.items() if k in properties}
+    args = {k: v for k, v in args.items() if k in properties}
+    if fn["name"] == SEARCH_TOOL and isinstance(args.get("query"), str):
+        args["query"] = _unsaid_years(args["query"], request, before, *(str(d[2]) for d in done))
+    return args
+
+
+SEARCH_TOOL = "web_search"
+_unsaid_years = local_search.unsaid_years   # moved to local_search (research.py needs it too)
 
 
 def _seen(images, request):
@@ -1132,6 +1177,7 @@ def _say(mode, messages, run, extra=""):
     # A result note of its own making after the answer ('... on the desktop, dear.   [Result of search_file] No file
     # named YouTube links found.', 2026-11-11): the model copies the notes' form. Only what stands before it is kept.
     content = ASIDE.sub("", (content or "").split(RESULT_OPEN.split("{")[0])[0].rstrip() or content or "")
+    content = _without_offer(content)
     messages.append({"role": "assistant", "content": content})
     return content
 
