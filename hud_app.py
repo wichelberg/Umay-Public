@@ -55,6 +55,7 @@ import hud_credits
 import hud_data
 import hud_detail
 import hud_disk
+import hud_lights
 import hud_feeds
 import hud_markets
 import hud_news
@@ -85,9 +86,12 @@ CODE_MARGIN = (14, 30)  # px from VS Code's right and bottom edges: off its scro
 LABEL_H = 20            # the WORKING label under the orb in VS Code
 ORB_BIG, ORB_SMALL = 420, 96
 
+# The owner's colors of 2026-11-21: standby light red, and every other state the even mix of that red and the state's
+# old color (listening #3DF5A8, thinking #A07BFF, researching #FFB23E, working #FF4FA3, speaking #E8F6FF), so they
+# read as one family.
 STATES = {  # color, label
-    "idle": ("#38D6FF", "STANDBY"), "listening": ("#3DF5A8", "LISTENING"), "thinking": ("#A07BFF", "THINKING"),
-    "researching": ("#FFB23E", "RESEARCHING"), "working": ("#FF4FA3", "WORKING"), "speaking": ("#E8F6FF", "SPEAKING"),
+    "idle": ("#FF969D", "STANDBY"), "listening": ("#9EC6A2", "LISTENING"), "thinking": ("#D088CE", "THINKING"),
+    "researching": ("#FFA46E", "RESEARCHING"), "working": ("#FF72A0", "WORKING"), "speaking": ("#F4C6CE", "SPEAKING"),
 }
 CODE_STATE = ("working", "#FF2E3B")  # the orb in VS Code while Umay is idle or working
 
@@ -408,6 +412,8 @@ class Orb(QWidget):
             self.apply()
         self.t = t
         self.frames = getattr(self, "frames", 0) + 1
+        if self.frames % 3 == 0:  # the keyboard in the state's color (only a change is sent)
+            hud_lights.show(self.shown()[1])
         if self.wallpaper is not None and self.frames % 3 == 0:  # ~10 a second: her state on the ring
             state = self.shown()[0]
             self.wallpaper.orb({"label": STATES[state][1], "color": self.col.name(),
@@ -570,8 +576,8 @@ class Panel(QWidget):
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         w, h = self.width(), self.height()
         g = QLinearGradient(0, 0, 0, h)
-        g.setColorAt(0, QColor(9, 22, 30, 205))
-        g.setColorAt(1, QColor(3, 9, 13, 175))
+        g.setColorAt(0, QColor(30, 12, 14, 205))
+        g.setColorAt(1, QColor(13, 5, 6, 175))
         p.fillRect(QRectF(0, 0, w, h), g)
         p.setPen(QPen(color(C["cyan"], 0.45 if self.hover else 0.16), 1))
         p.setBrush(Qt.BrushStyle.NoBrush)
@@ -880,14 +886,14 @@ class PanelMenu(QMenu):
 
 
 MENU_STYLE = (
-    "QMenu{background:rgba(3,12,17,235);border:1px solid rgba(56,214,255,90);padding:6px 0;"
-    "font-family:'Rajdhani';font-size:13px;font-weight:600;letter-spacing:2px;color:#B8D4DE}"
+    "QMenu{background:rgba(17,6,7,235);border:1px solid rgba(255,150,157,90);padding:6px 0;"
+    "font-family:'Rajdhani';font-size:13px;font-weight:600;letter-spacing:2px;color:#E2C5C8}"
     "QMenu::item{padding:6px 22px 6px 30px}"
-    "QMenu::item:selected{background:rgba(56,214,255,40);color:#E6F7FF}"
+    "QMenu::item:selected{background:rgba(255,150,157,40);color:#FFF0F1}"
     "QMenu::indicator{width:12px;height:12px;left:10px}"
-    "QMenu::indicator:checked{background:#38D6FF;border:1px solid #38D6FF}"
-    "QMenu::indicator:unchecked{border:1px solid rgba(56,214,255,140)}"
-    "QMenu::separator{height:1px;background:rgba(56,214,255,50);margin:5px 12px}")
+    "QMenu::indicator:checked{background:#FF969D;border:1px solid #FF969D}"
+    "QMenu::indicator:unchecked{border:1px solid rgba(255,150,157,140)}"
+    "QMenu::separator{height:1px;background:rgba(255,150,157,50);margin:5px 12px}")
 
 
 class PanelsButton(QWidget):
@@ -969,7 +975,7 @@ class PanelsButton(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         s, on = self.SIZE, len(self.hidden()) < len(self.panels)  # filled while any panel shows
-        p.setBrush(QColor(3, 12, 17, 200))
+        p.setBrush(QColor(17, 6, 7, 200))
         p.setPen(QPen(color(C["cyan"], 0.8 if self.hover else 0.45), 1.2))
         p.drawEllipse(QRectF(1, 1, s - 2, s - 2))
         cell, gap = 7, 3  # four panels: filled when they show, outlined when hidden
@@ -1018,7 +1024,7 @@ class MutedMic(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         s = self.SIZE
-        p.setBrush(QColor(3, 12, 17, 200))
+        p.setBrush(QColor(17, 6, 7, 200))
         p.setPen(QPen(color(C["hot"], 0.7), 1.2))
         p.drawEllipse(QRectF(1, 1, s - 2, s - 2))
         p.setBrush(Qt.BrushStyle.NoBrush)
@@ -1104,7 +1110,7 @@ class AlertBadge(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         s = self.SIZE
-        p.setBrush(QColor(3, 12, 17, 200))
+        p.setBrush(QColor(17, 6, 7, 200))
         p.setPen(QPen(color(C["amber"], 1.0 if self.hover else 0.75), 1.4))
         p.drawEllipse(QRectF(1, 1, s - 2, s - 2))
         p.setPen(QPen(QColor(C["amber"]), 3.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
@@ -1234,7 +1240,7 @@ class Toast(QWidget):
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.fillRect(QRectF(0, 0, self.width(), self.height()), QColor(6, 16, 22, 220))
+        p.fillRect(QRectF(0, 0, self.width(), self.height()), QColor(22, 9, 10, 220))
         p.setPen(QPen(color(C["cyan"], 0.35), 1))
         p.drawRect(QRectF(0.5, 0.5, self.width() - 1, self.height() - 1))
         p.fillRect(QRectF(0, 0, 3, self.height()), QColor(STATES[self.orb.state][0]))

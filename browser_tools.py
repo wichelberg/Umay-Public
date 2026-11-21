@@ -32,6 +32,18 @@ _keyboard = Controller()
 _last_results = []  # [(title, url, entry)] from the latest search_youtube
 _request = {"text": "", "videos": set()}  # what the owner wrote in this request, in lower case; the videos it opened
 HANDLE = re.compile(r"youtube\.com/(@[^/?#\s]+)", re.IGNORECASE)
+# An address the model wrote itself must have come from somewhere (2026-11-19: "university-learning-platform.com" for the
+# owner's Brightspace, and my.university.net for it the hour before, both said to be open): the owner's words, a tool's result
+# (a search hit, a tab list, a page's links), a site everybody knows. `_seen` keeps the registrable names of the session.
+ADDRESS = re.compile(r"https?://[^\s)\]>\"'<]+", re.IGNORECASE)
+BARE_ADDRESS = re.compile(r"\b(?:[a-z0-9-]+\.)+(?:com|net|org|io|ai|co|uk|edu|gov|tr|de|info|app|dev|tv)\b", re.IGNORECASE)
+FAMOUS = {"google.com", "youtube.com", "youtu.be", "wikipedia.org", "github.com", "reddit.com", "x.com", "twitter.com",
+          "facebook.com", "instagram.com", "linkedin.com", "amazon.com", "amazon.co.uk", "netflix.com", "spotify.com",
+          "twitch.tv", "discord.com", "whatsapp.com", "microsoft.com", "office.com", "outlook.com", "live.com", "bing.com",
+          "duckduckgo.com", "stackoverflow.com", "openai.com", "chatgpt.com", "anthropic.com", "claude.ai",
+          "steampowered.com", "bbc.co.uk", "bbc.com", "cnn.com", "nytimes.com", "apple.com", "yahoo.com"}
+SECOND_LEVEL = {"co", "com", "org", "net", "gov", "edu", "ac"}
+_seen = set()           # registrable names of addresses a tool showed or the owner wrote, this session
 LATEST = re.compile(r"\b(latest|newest|most recent|last (video|upload)|en son|son video)", re.IGNORECASE)
 CHANNEL_WORD = re.compile(r"\b(channel|kanal)", re.IGNORECASE)
 
@@ -72,6 +84,53 @@ def new_request(text):
     earlier may be opened again (see _opened_before)."""
     _request["text"] = (text or "").lower()
     _request["videos"] = set()
+    note_addresses(text)
+
+
+def _base(address):
+    """The registrable name of an address (brightspace.example.ac.uk -> example.ac.uk), "" when there is none."""
+    host = (urlparse(address if "//" in address else "//" + address).hostname or "").lower().removeprefix("www.")
+    labels = [p for p in host.split(".") if p]
+    if len(labels) <= 2:
+        return host
+    return ".".join(labels[-3:] if labels[-2] in SECOND_LEVEL and len(labels[-1]) == 2 else labels[-2:])
+
+
+def note_addresses(text):
+    """The addresses in `text` (the owner's words or a tool's answer) are real ones: open_in_browser may open them."""
+    for found in ADDRESS.findall(text or "") + BARE_ADDRESS.findall(text or ""):
+        base = _base(found.rstrip(".,;:"))
+        if base and len(_seen) < 2000:
+            _seen.add(base)
+
+
+def unknown_address(url):
+    """"" when `url` may be opened, else the refusal's text. Its wording keeps the address out of what note_addresses reads,
+    so a refusal can't make the made-up address count as seen."""
+    if urlparse(url or "").scheme not in ("http", "https") or _known(url):
+        return ""
+    return ("Not opened: nobody gave me that address and no search or tab showed it, so it may not exist. Don't guess an "
+            "address. If the site may be open already, look with web_tabs (list); else find its official address with "
+            "web_search and open that; else ask the owner.")
+
+
+def _local(host):
+    return host in ("localhost", "") or host.startswith(("127.", "192.168.", "10.")) or host.endswith(".local")
+
+
+def _known(url):
+    """True when somebody (the owner, a tool's answer, the router's list of sites) gave this address, or everyone knows it."""
+    host = (urlparse(url).hostname or "").lower()
+    base = _base(url)
+    if _local(host) or base in FAMOUS or base in _seen or (base and base in _request["text"]):
+        return True
+    try:
+        import pc_tools
+        import router   # the pages read in this request (strict mode keeps their links), and the router's list of sites
+        return (any(_base(seen) == base for seen in pc_tools.request_state()["urls"])
+                or any(_base(site) == base for site in router.SITES.values()))
+    except Exception:
+        return False
 
 
 def _opened_before(video_id, what):
@@ -144,6 +203,9 @@ def _address(entry):
 
 def _checked(url):
     """The address to open: a YouTube @address the owner didn't write must be proven, else it isn't opened."""
+    why = unknown_address(url)
+    if why:
+        raise ToolError(why)
     handle = HANDLE.search(url)
     if not handle or handle.group(1).lower() in _request["text"]:
         return url
@@ -419,8 +481,9 @@ TOOLS = [
         "open_in_browser",
         "Opens a web page in Opera GX (the user's browser): a new tab if Opera is running, otherwise it starts "
         "Opera with it. Always this for 'open <site>' or 'go to <site>', by name too: YouTube is https://www.youtube.com, Gmail is "
-        "https://mail.google.com. Only if you don't know a site's address, find it with web_search first. Never guess "
-        "a YouTube channel's @address: use open_youtube_channel.",
+        "https://mail.google.com. Never guess an address: a university's learning platform, a bank, a shop or any "
+        "site that isn't a famous one is found with web_search (or web_tabs, if it may be open already) first; an address "
+        "nobody gave and no search showed is refused. Never guess a YouTube channel's @address: use open_youtube_channel.",
         {"url": {"type": "string", "description": "Full http(s) URL, e.g. https://www.youtube.com"}},
         ["url"],
     ),

@@ -25,7 +25,8 @@ CHECK_MS = 1000  # also how soon her ring shows when the desktop clears (the orb
 FPS = 24
 # orb=1: Umay's ring is the cortex's outer ring (the owner's design, 2026-11-07); hud=0: the page's own info box
 # repeated the HUD's MEMORY panel, one of the things that made the desktop look chaotic.
-PAGE_ARGS = "src=push&fps={fps}&hudpos={hudpos}&spin=1&orb=1&hud=0"
+# sphere=1 / netc: the 3D sphere in the standby color (the owner's design, 2026-11-21)
+PAGE_ARGS = "src=push&fps={fps}&hudpos={hudpos}&spin=1&orb=1&hud=0&sphere=1&netc=ff969d"
 
 _user32 = ctypes.windll.user32
 _user32.FindWindowW.restype = wintypes.HWND
@@ -153,7 +154,7 @@ class Wallpaper:
         self.view.page().setBackgroundColor(QColor("#000"))
         self.view.setWindowTitle("Umay Cortex")
         url = QUrl.fromLocalFile(str(page_path()))
-        url.setQuery("demo=1&orb=1&hud=0" if demo else PAGE_ARGS.format(fps=FPS, hudpos=hudpos))
+        url.setQuery("demo=1&orb=1&hud=0&sphere=1&netc=ff969d" if demo else PAGE_ARGS.format(fps=FPS, hudpos=hudpos))
         self.view.load(url)
         self.ready, self.paused, self.last = False, False, None
         self.view.loadFinished.connect(self._loaded)

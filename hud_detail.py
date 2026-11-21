@@ -26,37 +26,37 @@ QLabel[role="head"] {{ color: {C['cyan2']}; font-size: 14px; letter-spacing: 3px
 QLabel[role="mono"] {{ font-family: 'JetBrains Mono'; font-size: 12px; font-weight: 400; }}
 QLabel[role="ok"] {{ color: {C['cyan']}; }}
 QLabel[role="bad"] {{ color: {C['hot']}; }}
-QTreeWidget {{ background: rgba(4, 12, 17, 150); border: 1px solid rgba(56, 214, 255, 40);
+QTreeWidget {{ background: rgba(17, 6, 7, 150); border: 1px solid rgba(255, 150, 157, 40);
     font-family: 'JetBrains Mono'; font-size: 12px; font-weight: 400; outline: 0;
-    selection-background-color: rgba(56, 214, 255, 55); selection-color: {C['text']};
-    alternate-background-color: rgba(56, 214, 255, 8); }}
+    selection-background-color: rgba(255, 150, 157, 55); selection-color: {C['text']};
+    alternate-background-color: rgba(255, 150, 157, 8); }}
 QTreeWidget::item {{ padding: 3px 4px; border: none; }}
-QTreeWidget::item:selected {{ background: rgba(56, 214, 255, 55); }}
+QTreeWidget::item:selected {{ background: rgba(255, 150, 157, 55); }}
 QHeaderView {{ background: transparent; }}
-QHeaderView::section {{ background: rgba(56, 214, 255, 18); color: {C['cyan2']}; border: none;
-    border-right: 1px solid rgba(56, 214, 255, 30); padding: 6px 6px; font-family: 'Rajdhani';
+QHeaderView::section {{ background: rgba(255, 150, 157, 18); color: {C['cyan2']}; border: none;
+    border-right: 1px solid rgba(255, 150, 157, 30); padding: 6px 6px; font-family: 'Rajdhani';
     font-size: 13px; font-weight: 700; }}
-QPushButton {{ background: rgba(56, 214, 255, 22); border: 1px solid rgba(56, 214, 255, 110);
+QPushButton {{ background: rgba(255, 150, 157, 22); border: 1px solid rgba(255, 150, 157, 110);
     color: {C['cyan2']}; padding: 6px 18px; font-size: 14px; font-weight: 700; letter-spacing: 2px; }}
-QPushButton:hover {{ background: rgba(56, 214, 255, 50); color: {C['text']}; }}
-QPushButton:disabled {{ color: {C['dim']}; border-color: rgba(62, 85, 96, 140); background: transparent; }}
+QPushButton:hover {{ background: rgba(255, 150, 157, 50); color: {C['text']}; }}
+QPushButton:disabled {{ color: {C['dim']}; border-color: rgba(96, 66, 70, 140); background: transparent; }}
 QPushButton[role="danger"] {{ color: {C['hot']}; border-color: rgba(255, 79, 163, 140);
     background: rgba(255, 79, 163, 22); }}
 QPushButton[role="danger"]:hover {{ background: rgba(255, 79, 163, 60); color: {C['text']}; }}
-QPushButton[role="danger"]:disabled {{ color: {C['dim']}; border-color: rgba(62, 85, 96, 140);
+QPushButton[role="danger"]:disabled {{ color: {C['dim']}; border-color: rgba(96, 66, 70, 140);
     background: transparent; }}
-QComboBox {{ background: rgba(56, 214, 255, 14); border: 1px solid rgba(56, 214, 255, 80); padding: 4px 10px;
+QComboBox {{ background: rgba(255, 150, 157, 14); border: 1px solid rgba(255, 150, 157, 80); padding: 4px 10px;
     min-width: 120px; color: {C['text']}; }}
 QComboBox::drop-down {{ border: none; width: 22px; }}
-QComboBox QAbstractItemView {{ background: #08151c; border: 1px solid rgba(56, 214, 255, 90);
-    selection-background-color: rgba(56, 214, 255, 60); color: {C['text']}; outline: 0; }}
+QComboBox QAbstractItemView {{ background: #1c0a0c; border: 1px solid rgba(255, 150, 157, 90);
+    selection-background-color: rgba(255, 150, 157, 60); color: {C['text']}; outline: 0; }}
 QScrollBar:vertical {{ background: transparent; width: 9px; margin: 0; }}
-QScrollBar::handle:vertical {{ background: rgba(56, 214, 255, 80); min-height: 30px; }}
+QScrollBar::handle:vertical {{ background: rgba(255, 150, 157, 80); min-height: 30px; }}
 QScrollBar:horizontal {{ background: transparent; height: 9px; margin: 0; }}
-QScrollBar::handle:horizontal {{ background: rgba(56, 214, 255, 80); min-width: 30px; }}
+QScrollBar::handle:horizontal {{ background: rgba(255, 150, 157, 80); min-width: 30px; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
-QPlainTextEdit {{ background: rgba(4, 12, 17, 150); border: 1px solid rgba(56, 214, 255, 40);
+QPlainTextEdit {{ background: rgba(17, 6, 7, 150); border: 1px solid rgba(255, 150, 157, 40);
     font-family: 'JetBrains Mono'; font-size: 12px; font-weight: 400; color: {C['text']}; }}
 """
 
@@ -68,8 +68,8 @@ def ease(t):
 def frame(p, r, alpha=1.0, corner=22):
     """The HUD panel's frame, bigger: dark glass, a thin cyan edge and the corner brackets."""
     g = QLinearGradient(r.topLeft(), r.bottomLeft())
-    g.setColorAt(0, QColor(9, 22, 30, int(252 * alpha)))
-    g.setColorAt(1, QColor(3, 9, 13, int(250 * alpha)))
+    g.setColorAt(0, QColor(30, 12, 14, int(252 * alpha)))
+    g.setColorAt(1, QColor(13, 5, 6, int(250 * alpha)))
     p.fillRect(r, g)
     p.setPen(QPen(color(C["cyan"], 0.22 * alpha), 1))
     p.setBrush(Qt.BrushStyle.NoBrush)
@@ -271,7 +271,7 @@ class Detail(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         e = ease(self.t)
-        p.fillRect(QRectF(0, 0, self.width(), self.height()), QColor(0, 4, 8, int(150 * e)))
+        p.fillRect(QRectF(0, 0, self.width(), self.height()), QColor(8, 2, 3, int(150 * e)))
         r = self.rect_now()
         frame(p, r, 0.35 + 0.65 * e)
         if self.t >= 0.999 and not self.closing:

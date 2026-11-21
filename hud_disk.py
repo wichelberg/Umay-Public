@@ -164,7 +164,7 @@ class Confirm(QWidget):
 
     def paintEvent(self, _):
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor(0, 4, 8, 170))
+        p.fillRect(self.rect(), QColor(8, 2, 3, 170))
         frame(p, QRectF(self.box.geometry()), 1.0, 16)
         p.end()
 

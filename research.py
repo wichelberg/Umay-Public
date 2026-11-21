@@ -156,12 +156,18 @@ def _int(name, default, low=1):
         return default
 
 
-def max_pages():
-    return _int("UMAY_RESEARCH_PAGES", 18)
+def quiet(job):
+    """A topic job (source "topic": topic_research studies a topic the owner asked about while they are away): shorter,
+    and it tells nobody; what it finds goes into the memory and its report into the "auto" folder."""
+    return (job or {}).get("source") == "topic"
 
 
-def max_minutes():
-    return _int("UMAY_RESEARCH_MINUTES", 45)
+def max_pages(job=None):
+    return _int("UMAY_TOPIC_PAGES", 10) if quiet(job) else _int("UMAY_RESEARCH_PAGES", 18)
+
+
+def max_minutes(job=None):
+    return _int("UMAY_TOPIC_MINUTES", 30) if quiet(job) else _int("UMAY_RESEARCH_MINUTES", 45)
 
 
 # --- the checks that are code, not the model ----------------------------------------------------------------------
@@ -319,7 +325,7 @@ def _ask(job, prompt, schema, system, max_tokens):
 
 
 def _out_of_time(job):
-    return time.monotonic() - job["began"] - job.get("paused", 0.0) > max_minutes() * 60
+    return time.monotonic() - job["began"] - job.get("paused", 0.0) > max_minutes(job) * 60
 
 
 def _stage(job, text):
@@ -518,7 +524,7 @@ def _run(job):
             _save(job)
         notes = job.setdefault("notes", {})
         for index, item in enumerate(job["plan"]):
-            if _job["stop"] or _out_of_time(job) or sum(1 for n in notes.values() if n.get("tried")) >= max_pages():
+            if _job["stop"] or _out_of_time(job) or sum(1 for n in notes.values() if n.get("tried")) >= max_pages(job):
                 break
             _stage(job, f"question {index + 1} of {len(job['plan'])}: reading")
             if not any(n["index"] == index for n in notes.values()):
@@ -552,21 +558,44 @@ def _run(job):
             "open_questions": []}
         summary["unsupported"] = unsupported_numbers(summary.get("summary") or "", findings)
         report = render(job, findings, summary, stats)
-        folder = out_dir()
+        folder = out_dir() / "auto" if quiet(job) else out_dir()
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / f"{datetime.now():%Y-%m-%d_%H-%M}_{_slug(job['topic'])}.md"
         path.write_text(report, encoding="utf-8")
         job.update(done=True, report=str(path), stats=stats)
         _save(job)
+        _remember(job, findings, summary)
         _deliver(job, path, summary, stats)
     except Unavailable as e:
-        _tell(f"Research on \"{job['topic'][:80]}\" was stopped." if _job["stop"] else
+        _say(job, f"Research on \"{job['topic'][:80]}\" was stopped." if _job["stop"] else
               f"Research on \"{job['topic'][:80]}\" stopped: {e}. The pages it had read are kept on the disk.")
     except Exception as e:  # a bug must not leave the owner waiting for a report
-        _tell(f"Research on \"{job['topic'][:80]}\" failed: {type(e).__name__}: {e}"[:400])
+        _say(job, f"Research on \"{job['topic'][:80]}\" failed: {type(e).__name__}: {e}"[:400])
     finally:
         _job.update(thread=None, stage="", stop=False)
         planner_server.forget_restore()   # our prompts took the slot: the next plan puts its own prefix back
+
+
+def _remember(job, findings, summary):
+    """What the job verified goes into the memory (topic_research.ingest): the owner's own "research X" too. A bug there
+    must not lose the report."""
+    try:
+        import topic_research
+        n = topic_research.ingest(job["topic"], findings, summary)
+        if quiet(job) and n:
+            import companion
+            companion.tell(f"While you were away I read up on \"{job['topic'][:60]}\", dear: {n} new notes in my memory.",
+                           "notable", "research")
+    except Exception as e:
+        memory_cortex._log(f"topic research: ingest failed: {type(e).__name__}: {e}")
+
+
+def _say(job, text):
+    """What a job reports about itself: to the owner (_tell), except a topic job, which only logs."""
+    if quiet(job):
+        memory_cortex._log(f"topic research: {text[:200]}")
+    else:
+        _tell(text)
 
 
 def _tell(text):
@@ -584,7 +613,9 @@ def _tell(text):
 
 
 def _deliver(job, path, summary, stats):
-    text = (f"Research done: {job['topic'][:100]}\n\n{(summary.get('summary') or '').strip()}\n\n"
+    if quiet(job):
+        return
+    text =(f"Research done: {job['topic'][:100]}\n\n{(summary.get('summary') or '').strip()}\n\n"
             f"{stats['pages_read']} pages, {stats['claims_kept']} claims kept. Report: {path}")
     _tell(text[:3500])
     try:
@@ -614,7 +645,7 @@ def start(topic, source="other"):
 
 
 def _launch(job):
-    _job.update(topic=job["topic"], id=job["id"], stage="starting", stop=False)
+    _job.update(topic=job["topic"], id=job["id"], stage="starting", stop=False, source=job.get("source", ""))
     target = _run
     if job.get("mode") == "pdf":      # a PDF study (pdf_study.py) shares this slot, its stop / status and its restart
         import pdf_study
@@ -623,6 +654,11 @@ def _launch(job):
     _job["thread"] = thread
     _save(job)
     thread.start()
+
+
+def topic_running():
+    """A topic job (quiet, while the owner is away) is running: topic_research stops it when they come back."""
+    return _job["thread"] is not None and _job["thread"].is_alive() and _job.get("source") == "topic"
 
 
 def stop():
@@ -671,7 +707,7 @@ def resume():
                 if not planner_server.available():
                     return False
                 _launch(job)
-            _tell(f"Umay restarted; I'm going on with the research \"{job['topic'][:80]}\".")
+            _say(job, f"Umay restarted; I'm going on with the research \"{job['topic'][:80]}\".")
             return True
     except (OSError, ValueError, KeyError):
         pass

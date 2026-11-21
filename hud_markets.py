@@ -288,7 +288,7 @@ class MarketsView(Painted):
             lw = p.fontMetrics().horizontalAdvance(label) + 20
             bx = min(max(r.left(), pt.x() - lw / 2), r.right() - lw)
             box = QRectF(bx, r.top() + 6, lw, 26)
-            p.fillRect(box, QColor(6, 16, 22, 235))
+            p.fillRect(box, QColor(22, 9, 10, 235))
             p.setPen(QPen(color(C["cyan"], 0.5), 1))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRect(box)

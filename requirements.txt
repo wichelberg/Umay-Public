@@ -19,6 +19,9 @@ winrt-Windows.Media.Control
 winrt-Windows.Media
 winrt-Windows.Foundation
 winrt-Windows.Foundation.Collections
+winrt-Windows.Devices.Lights
+winrt-Windows.Devices.Enumeration
+winrt-Windows.UI
 ddgs
 trafilatura
 pypdf

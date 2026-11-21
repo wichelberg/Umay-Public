@@ -421,9 +421,14 @@ def move_to_monitor(which):
         return None, "There is only one monitor."
     here = hand_gesture.monitor_of(screens, *_cursor())
     there = target_monitor(screens, here, which)
+    if there is None and which in ("left", "right"):
+        # "my left screen" with the cursor already on the leftmost one (2026-11-19): that is the monitor meant. An
+        # error with no screenshot ended the turn and the talker then said it had clicked.
+        there = here
     if there is None:
         return None, f"There is no monitor to the {which} of the one the cursor is on."
-    name = "main" if which == "main" else "left" if there[0] < here[0] else "right"
+    name = "main" if which == "main" else which if which in ("left", "right") and there == here \
+        else "left" if there[0] < here[0] else "right"
     if there != here:
         _move((there[0] + there[2]) // 2, (there[1] + there[3]) // 2)
     screen_tools.use_monitor(there)

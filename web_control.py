@@ -372,6 +372,9 @@ def web_tabs(action: str, tab_id: int = None, url: str = "", percent: int = None
             if action == "open" or url:
                 if urlparse(url).scheme not in ("http", "https"):
                     raise ToolError("Give a full http(s) address to open.")
+                import browser_tools   # an address nobody gave and no search showed is not opened (2026-11-19)
+                if browser_tools.unknown_address(url):
+                    raise ToolError(browser_tools.unknown_address(url))
                 if not _may_open(url):
                     return _declined()
             tab = _call("open", url=url) if action == "open" else _call("window", url=url or None)

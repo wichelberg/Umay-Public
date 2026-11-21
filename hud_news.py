@@ -20,7 +20,7 @@ TICK_MS = 60_000  # the ages move on while it is open
 WATCH_COL, TOPIC_COL = C["amber"], C["cyan2"]
 QSS = f"""
 QPushButton {{ padding: 4px 12px; font-size: 13px; letter-spacing: 1px; }}
-QPushButton:checked {{ background: rgba(56, 214, 255, 75); color: {C['text']}; border-color: {C['cyan']}; }}
+QPushButton:checked {{ background: rgba(255, 150, 157, 75); color: {C['text']}; border-color: {C['cyan']}; }}
 QPushButton[role="watch"] {{ color: {C['amber']}; border-color: rgba(255, 178, 62, 110);
     background: rgba(255, 178, 62, 18); }}
 QPushButton[role="watch"]:checked {{ background: rgba(255, 178, 62, 70); color: {C['text']};

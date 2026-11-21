@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!-- Ties UmayLights.exe to its sparse package (packaging/lights/AppxManifest.xml): publisher, packageName and
+     applicationId must match Identity Publisher, Identity Name and Application Id there. -->
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <assemblyIdentity version="1.0.0.0" name="UmayLights"/>
+  <msix xmlns="urn:schemas-microsoft-com:msix.v1" publisher="CN=UmayLights" packageName="Umay.Lights" applicationId="UmayLights"/>
+</assembly>

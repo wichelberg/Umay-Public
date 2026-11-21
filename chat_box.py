@@ -24,16 +24,16 @@ gdi32.DeleteDC.argtypes = [wintypes.HDC]
 user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
 
 # The HUD's colors (hud_paint.C): NAVY is the panel's glass, flat so the Tk window sits in it without a seam.
-NAVY = "#07141a"
-NAVY_LIGHT = "#0c2129"
-TEXT = "#e6f7ff"
+NAVY = "#1a0a0c"
+NAVY_LIGHT = "#291214"
+TEXT = "#fff0f1"
 PINK = "#ff4fa3"
-CYAN = "#38d6ff"
-CYAN2 = "#7fdfff"
-MUTED = "#6e8a96"
-DIM = "#1d3a45"
+CYAN = "#ff969d"
+CYAN2 = "#ffc2c6"
+MUTED = "#967b7e"
+DIM = "#452a2d"
 PANEL_RGB = (7, 20, 26)
-CYAN_RGB = np.array([56, 214, 255], np.float32)
+CYAN_RGB = np.array([255, 150, 157], np.float32)
 MARGIN = 22         # room around the panel for the glow
 INSET = 8           # from the frame's edge to the Tk window
 CORNER = 18         # the corner brackets' length

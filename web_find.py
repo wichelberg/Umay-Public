@@ -114,7 +114,7 @@ def candidates(goal_words, elements, visited, site):
 
 
 def _same_site(host, site):
-    """True for the same registrable-ish domain: brightspace.brunel.ac.uk and brunel.ac.uk count as one."""
+    """True for the same registrable-ish domain: brightspace.example.ac.uk and example.ac.uk count as one."""
     a, b = host.lower().split("."), site.lower().split(".")
     return a[-3:] == b[-3:] or a[-2:] == b[-2:] and len(a[-2]) > 3
 
@@ -253,6 +253,9 @@ def web_find_in_site(goal: str, url: str = "", tab_id: int = None) -> str:
         if url:
             if urlparse(url).scheme not in ("http", "https"):
                 raise wc.ToolError("Give the site's full http(s) address, or leave url empty to use the open tab.")
+            import browser_tools   # an address nobody gave and no search showed is not opened (2026-11-19)
+            if browser_tools.unknown_address(url):
+                raise wc.ToolError(browser_tools.unknown_address(url))
             if not wc._may_open(url):
                 return wc._declined()
             tab = wc._call("open", url=url)

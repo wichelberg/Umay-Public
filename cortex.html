@@ -24,6 +24,16 @@
     hudpos=bl       bl | br | tl | tr
     fps=30          frame cap (24–30 is plenty for a wallpaper)
     ambient=0       1 = faint random sparks when idle (purely cosmetic, not real activity)
+    sphere=1        the network as a turning 3D sphere (the owner's design, 2026-11-21): conversations on the shell
+                    near the facts they link to, the areas inside; same connections. Its own settings:
+      tight=1       how clustered the areas are (0 spread .. 1 tight, the owner's pick)
+      netc=ff969d   USER's neurons, lines and labels in one color (the standby's); SELF stays amber, firing green
+      fx=orbit,scan,bokeh   extras, all on by default: the inbox as satellites on an orbit, a band of light while
+                    she consolidates or researches, far neurons as soft blurs (fx= turns them off)
+    for screenshots and tests only:
+      rot=0.6       a fixed turn instead of spinning;  seed=7  the same layout on every load
+      tshift=ms     moves the extras' clock;  scan=1  the scan band always;  orbc=hex  the ring's color
+      bench=1       times 300 frames and one physics step: the result goes in document.title
 
   JSON schema:
     {
@@ -132,14 +142,37 @@ const CFG = {
   cx: num('cx', .5), cy: num('cy', .5), scale: num('scale', 1),
   spin: num('spin', 1), fps: num('fps', 30),
   hud: Q.get('hud') !== '0', hudpos: Q.get('hudpos') || 'bl',
-  orb: Q.get('orb') === '1'
+  orb: Q.get('orb') === '1',
+  sphere: Q.get('sphere') === '1',
+  rot: Q.has('rot') ? num('rot', 0) : null,      // a fixed turn (radians) instead of spinning: for screenshots
+  orbc: Q.get('orbc') || null,                    // the ring's color before the host sets one (hex, no #)
+  netc: Q.get('netc') || null,                    // the network's color (hex, no #): USER's neurons and lines
+  // sphere extras (comma list): orbit = the inbox circles the sphere like satellites; scan = a band of light sweeps
+  // over it while she consolidates or researches (scan=1 shows it always); bokeh = far neurons are soft blurs
+  fx: new Set((Q.has('fx') ? Q.get('fx') : 'orbit,scan,bokeh').split(',').filter(Boolean)),   // all three: the owner's pick 2026-11-21 scan: Q.get('scan') === '1',
+  tshift: num('tshift', 0),                        // ms added to the extras' clock: frames of one motion, for screenshots
+  bench: Q.get('bench') === '1'                   // times 300 frames once the data is in: the result goes in the title
 };
+const bench = { done: false };
+if (Q.has('seed')) {   // seed=N: the same layout on every load (screenshots of one turn, frame by frame)
+  let sd = num('seed', 1) >>> 0;
+  Math.random = () => { sd = (sd + 0x6D2B79F5) >>> 0; let t = sd; t = Math.imul(t ^ t >>> 15, t | 1);
+                        t ^= t + Math.imul(t ^ t >>> 7, t | 61); return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+}
+// sphere=1 (the owner's design, 2026-11-21): the network in 3D. The conversations (Memories' episodes) lie on a
+// sphere's shell, each where the facts it is linked to are; the rest fills the inside, spread out. The connections are
+// the same ones; only the places change. The physics stops once it has settled: a frame then only turns and projects.
+// TIGHT: how clustered the inside is: each area's facts closer around it (0 = spread out, the first look; 1 = tight,
+// the owner's pick 2026-11-21)
+const SPH = { R: 260, IN: 0.72, TILT: 0.38, PERSP: 3.2, FIT: 0.86, TIGHT: Math.min(1, Math.max(0, num('tight', 1))) };
+const lerp = (p, q, t) => p + (q - p) * t;
 // R: of min(W, H); NET: how far out the network may reach, of the ring; MAXZ: the closest zoom (px per unit):
 // a small memory is shown up close and the camera backs off slowly as it grows (the owner, 2026-11-08)
 // NET 0.74: every neuron stays inside the colored star dust (it starts at 0.8 of the ring): fitting 85% of
 // them let the rest run out under the ring, and their links seemed to go nowhere (the owner, 2026-11-08)
 const ORB = { R: 0.44, NET: 0.74, TITLE: 0.80, CLOCK: 0.66, MAXZ: 3.4 };
 const orbState = { label: 'STANDBY', color: [56, 214, 255], level: 0 };
+if (CFG.orbc) orbState.color = [0, 2, 4].map(i => parseInt(CFG.orbc.substr(i, 2), 16) || 0);
 const stars = Array.from({ length: 240 }, () => ({
   r: Math.sqrt(Math.random()) * 0.97, a: Math.random() * 6.2832, s: 0.6 + Math.random() * 1.1,
   w: (Math.random() - 0.5) * 0.00012, ph: Math.random() * 6.2832, tw: 0.4 + Math.random() * 1.6
@@ -163,6 +196,16 @@ if (!CFG.hud) hudEl.style.display = 'none';
 const COL = { user: [41, 198, 230], self: [242, 184, 75], leaf: [160, 192, 202], hot: [63, 240, 168], gone: [235, 92, 92] };
 const rgba = (c, a) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
 const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+// netc (the owner, 2026-11-21: the neurons in the standby's color): USER's neurons, lines and labels in that color.
+// SELF stays amber and what fires stays green: they mean something else.
+const hex3 = h => [0, 2, 4].map(i => parseInt(String(h).replace('#', '').substr(i, 2), 16) || 0);
+const NET = CFG.netc ? hex3(CFG.netc) : null, WHITE = [255, 255, 255];
+if (NET) { COL.user = NET; COL.leaf = mix(NET, WHITE, .4); }
+const PAL = {
+  cold: NET ? mix(NET, WHITE, .3) : [170, 200, 210], tree: NET ? mix(NET, [120, 110, 120], .4) : [120, 170, 185],
+  rel: NET || [41, 198, 230], core: NET ? mix(NET, WHITE, .6) : [205, 238, 246], rootCore: NET ? mix(NET, WHITE, .82) : [239, 252, 255],
+  label: NET ? mix(NET, WHITE, .25) : [120, 220, 245], cat: NET ? mix(NET, WHITE, .3) : [150, 205, 220]
+};
 function sprite(c) {
   const s = document.createElement('canvas'); s.width = s.height = 64;
   const g = s.getContext('2d'), gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
@@ -200,7 +243,7 @@ function merge(data) {
   const ids = new Set(inc.map(d => d.id));
   for (const [id, n] of [...nodes]) {
     if (ids.has(id)) continue;
-    if (!firstLoad && n.status !== 'inbox') ghosts.push({ x: n.x, y: n.y, t: performance.now() });
+    if (!firstLoad && n.status !== 'inbox') ghosts.push({ x: CFG.sphere ? n.fx || 0 : n.x, y: CFG.sphere ? n.fy || 0 : n.y, t: performance.now() });
     nodes.delete(id);
   }
 
@@ -226,7 +269,7 @@ function merge(data) {
   }
   if (firstLoad) {
     firstLoad = false;
-    alpha = 1; for (let i = 0; i < 320; i++) tick();
+    alpha = 1; for (let i = 0; i < (CFG.sphere ? 600 : 320); i++) (CFG.sphere ? tick3 : tick)();
     let last = null;
     for (const n of sim) if (n.created && (!last || n.created > last.created)) last = n;
     stats.last = last;
@@ -234,10 +277,11 @@ function merge(data) {
 }
 function create(d) {
   const now = performance.now(), p = d.parent && nodes.get(d.parent);
-  const n = { id: d.id, x: 0, y: 0, vx: 0, vy: 0, born: -1e12, deg: 0, q: 1, r: 1.5, depth: 0,
+  const n = { id: d.id, x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, born: -1e12, deg: 0, q: 1, r: 1.5, depth: 0,
               status: d.status || 'placed', flash: 0, heat: 0, read: 0 };
-  if (p) { const a = Math.random() * 6.2832, r = 4 + Math.random() * 6; n.x = p.x + Math.cos(a) * r; n.y = p.y + Math.sin(a) * r; }
-  else { n.x = (Math.random() - .5) * 80; n.y = (Math.random() - .5) * 80; }
+  if (p) { const a = Math.random() * 6.2832, r = 4 + Math.random() * 6; n.x = p.x + Math.cos(a) * r; n.y = p.y + Math.sin(a) * r;
+           n.z = (p.z || 0) + (Math.random() - .5) * r; }
+  else { n.x = (Math.random() - .5) * 80; n.y = (Math.random() - .5) * 80; n.z = (Math.random() - .5) * 80; }
   nodes.set(d.id, n);
   if (!firstLoad) { reheat(.35); if (n.status !== 'inbox') bloom(n, now); }
 }
@@ -283,7 +327,18 @@ function rebuild() {
     n.hub = n.type === 'root' || n.type === 'category' || n.deg >= 6;
     n.r = (n.type === 'root' ? 5.5 : Math.min(6, 1.1 + Math.sqrt(n.deg) * .5 + n.imp * 1.2)) * (CFG.orb ? 1.6 : 1);
   });
+  for (const n of sim) n.shell = CFG.sphere && n.type === 'episode';
   for (const e of edges) {
+    if (CFG.sphere) {   // longer and softer than in 2D: the inside spreads out instead of clustering
+      if (e.k === 'tree') {
+        if (e.b.type === 'category') { e.len = 95; e.str = .12; }
+        else if (e.a.type === 'root') { e.len = 70; e.str = .25; }
+        else { e.len = lerp(26, 7, SPH.TIGHT) + Math.sqrt(e.a.deg) * lerp(7, 2.5, SPH.TIGHT); e.str = lerp(.35, .6, SPH.TIGHT); }
+      } else if (e.k === 'rel') { e.len = 40; e.str = .05; }
+      else { e.len = 150; e.str = .03; }
+      e.bias = e.a.deg / (e.a.deg + e.b.deg);
+      continue;
+    }
     if (e.k === 'tree') {
       if (e.b.type === 'category') { e.len = CFG.orb ? 85 : 170; e.str = .15; }
       else if (e.a.type === 'root') { e.len = CFG.orb ? 55 : 70; e.str = .3; }
@@ -349,6 +404,78 @@ function tick() {
     n.x += n.vx; n.y += n.vy;
   }
   alpha = Math.max(.04, alpha * .985);
+}
+
+// sphere=1: the same springs and pushes in 3D. A shell neuron (a conversation) feels only the pull of the facts it
+// is linked to and the push of the other conversations, then goes back onto the shell: the tree line to Memories
+// would pull them all to one side. A fact is barely pulled out by them (bias), so the inside keeps its shape.
+function tick3() {
+  const a = alpha, R = SPH.R, RIN = SPH.R * SPH.IN;
+  for (const e of edges) {
+    const A = e.a, B = e.b;
+    if ((A.shell || B.shell) && e.k === 'tree') continue;
+    let dx = B.x - A.x, dy = B.y - A.y, dz = B.z - A.z;
+    const d = Math.sqrt(dx * dx + dy * dy + dz * dz) || .01;
+    const f = (d - e.len) / d * e.str * a;
+    dx *= f; dy *= f; dz *= f;
+    const bias = A.shell !== B.shell ? (B.shell ? 1 : 0) : e.bias;   // the shell side moves, the fact stays
+    B.vx -= dx * bias; B.vy -= dy * bias; B.vz -= dz * bias;
+    A.vx += dx * (1 - bias); A.vy += dy * (1 - bias); A.vz += dz * (1 - bias);
+  }
+  const inner = sim.filter(n => !n.shell), shell = sim.filter(n => n.shell);
+  // short-range push between inner neurons (3D grid)
+  const C = 56, grid = new Map(), key = (x, y, z) => (x * 1024 + y) * 1024 + z;
+  for (const n of inner) {
+    const k = key(Math.floor(n.x / C) + 512, Math.floor(n.y / C) + 512, Math.floor(n.z / C) + 512);
+    let c = grid.get(k); if (!c) grid.set(k, c = []); c.push(n);
+  }
+  const R2 = C * C, K = lerp(16, 4, SPH.TIGHT) * a;
+  for (const n of inner) {
+    const gx = Math.floor(n.x / C) + 512, gy = Math.floor(n.y / C) + 512, gz = Math.floor(n.z / C) + 512;
+    for (let ox = -1; ox <= 1; ox++) for (let oy = -1; oy <= 1; oy++) for (let oz = -1; oz <= 1; oz++) {
+      const c = grid.get(key(gx + ox, gy + oy, gz + oz)); if (!c) continue;
+      for (const m of c) {
+        if (m.i <= n.i) continue;
+        let dx = n.x - m.x, dy = n.y - m.y, dz = n.z - m.z, d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 > R2) continue;
+        if (d2 < .01) { dx = Math.random() - .5; dy = Math.random() - .5; dz = Math.random() - .5; d2 = .5; }
+        const f = K * n.q * m.q / (d2 + 3);
+        n.vx += dx * f; n.vy += dy * f; n.vz += dz * f; m.vx -= dx * f; m.vy -= dy * f; m.vz -= dz * f;
+      }
+    }
+  }
+  // the hubs keep apart, so the areas don't sit in one lump
+  const hubs = inner.filter(n => n.hub), HK = 160 * a;   // the areas stay apart however tight each one is
+  for (let i = 0; i < hubs.length; i++) for (let j = i + 1; j < hubs.length; j++) {
+    const p = hubs[i], q = hubs[j];
+    const dx = p.x - q.x, dy = p.y - q.y, dz = p.z - q.z, d2 = dx * dx + dy * dy + dz * dz;
+    const f = HK * p.q * q.q / (d2 + 400);
+    p.vx += dx * f; p.vy += dy * f; p.vz += dz * f; q.vx -= dx * f; q.vy -= dy * f; q.vz -= dz * f;
+  }
+  // conversations spread evenly over the shell (all pairs: a few hundred)
+  const SK = 900 * a;
+  for (let i = 0; i < shell.length; i++) for (let j = i + 1; j < shell.length; j++) {
+    const p = shell[i], q = shell[j];
+    const dx = p.x - q.x, dy = p.y - q.y, dz = p.z - q.z, d2 = dx * dx + dy * dy + dz * dz;
+    if (d2 > R2 * 9) continue;
+    const f = SK / (d2 + 50) / Math.sqrt(d2 + 1);
+    p.vx += dx * f; p.vy += dy * f; p.vz += dz * f; q.vx -= dx * f; q.vy -= dy * f; q.vz -= dz * f;
+  }
+  for (const n of sim) {
+    if (CFG.orb && memNode && selfRoot && userRoot && (n === userRoot || n === selfRoot || n === memNode)) {
+      n.x = n === userRoot ? PIN : n === selfRoot ? -PIN : 0; n.y = n.z = n.vx = n.vy = n.vz = 0; continue;
+    }
+    if (n === userRoot && !(CFG.orb && memNode)) { n.x = n.y = n.z = n.vx = n.vy = n.vz = 0; continue; }
+    if (!n.shell) { n.vx -= n.x * .002 * a; n.vy -= n.y * .002 * a; n.vz -= n.z * .002 * a; }
+    n.vx *= .6; n.vy *= .6; n.vz *= .6;
+    const v2 = n.vx * n.vx + n.vy * n.vy + n.vz * n.vz;
+    if (v2 > 400) { const s = 20 / Math.sqrt(v2); n.vx *= s; n.vy *= s; n.vz *= s; }
+    n.x += n.vx; n.y += n.vy; n.z += n.vz;
+    const d = Math.sqrt(n.x * n.x + n.y * n.y + n.z * n.z) || .01;
+    if (n.shell) { const k = R / d; n.x *= k; n.y *= k; n.z *= k; }          // back onto the shell
+    else if (d > RIN) { const k = 1 - (d - RIN) / d * .5; n.x *= k; n.y *= k; n.z *= k; }   // softly inside
+  }
+  alpha = alpha * .993;   // ~630 ticks from a full start to settled (.012)
 }
 
 /* ---------- olaylar ---------- */
@@ -434,11 +561,11 @@ function drawOrb(ox, oy, R, now) {
   ctx.fillText(hm, ox, cy);
   const w = ctx.measureText(hm).width;
   if (HAS_LS) ctx.letterSpacing = '0px';
-  ctx.textAlign = 'left'; ctx.font = '14px "Share Tech Mono", monospace'; ctx.fillStyle = 'rgba(56,214,255,.95)';
+  ctx.textAlign = 'left'; ctx.font = '14px "Share Tech Mono", monospace'; ctx.fillStyle = rgba(c, .95);   // her state's color
   ctx.fillText(String(d.getSeconds()).padStart(2, '0'), ox + w / 2 + 6, cy);
   ctx.textAlign = 'center';
   if (HAS_LS) ctx.letterSpacing = '6px';
-  ctx.font = '600 12px Rajdhani, sans-serif'; ctx.fillStyle = 'rgba(127,223,255,.9)';
+  ctx.font = '600 12px Rajdhani, sans-serif'; ctx.fillStyle = rgba(mix(c, [255, 255, 255], .35), .9);
   ctx.fillText(d.toLocaleDateString('en-GB', { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' })
                 .replace(',', ' ·').toUpperCase(), ox + 3, cy + 26);
   if (HAS_LS) ctx.letterSpacing = '0px';
@@ -464,27 +591,64 @@ function frame(now) {
   if (innerWidth !== W || innerHeight !== H) resize();
   if (now - lastF < 1000 / CFG.fps - 2) return;
   const dt = Math.min(100, now - (lastF || now)); lastF = now;
-  tick();
+  if (!CFG.sphere) tick();
+  else if (alpha > .012) tick3();     // settled: no physics, the frame only turns and projects
 
-  const ds = sim.map(n => Math.hypot(n.x, n.y)).sort((a, b) => a - b);
+  const ds = CFG.sphere ? [] : sim.map(n => Math.hypot(n.x, n.y)).sort((a, b) => a - b);
   // orb mode fits every neuron inside her star dust (ORB.NET); the camera backs off slowly as the memory grows
-  const R = Math.max(CFG.orb ? 40 : 80, ds.length ? ds[Math.floor((ds.length - 1) * (CFG.orb ? 1 : .985))] : 80);
+  // (sphere: the shell's nearest point, which the perspective makes bigger, is what has to fit)
+  const R = CFG.sphere ? SPH.R * SPH.PERSP / (SPH.PERSP - 1)
+    : Math.max(CFG.orb ? 40 : 80, ds.length ? ds[Math.floor((ds.length - 1) * (CFG.orb ? 1 : .985))] : 80);
   cam.R += (R - cam.R) * .04;
   // orb mode: her ring is fixed to the screen, the network is fitted inside it (title above, clock below)
   const orbR = Math.min(W, H) * ORB.R * CFG.scale;
-  const ts = CFG.orb ? Math.min(ORB.MAXZ, orbR * ORB.NET / (cam.R + 12))
+  const ts = CFG.orb ? Math.min(ORB.MAXZ, orbR * (CFG.sphere ? SPH.FIT : ORB.NET) / (cam.R + 12))
                      : Math.min(W, H) * .46 * CFG.scale / (cam.R * 1.14 + 56);
   cam.s += (ts - cam.s) * (CFG.orb && ts < cam.s ? .012 : .05);   // backs off slowly, comes closer quicker
+  if (CFG.sphere && sim.length && !cam.fit) { cam.s = ts; cam.fit = true; }   // the sphere's size is known: no zoom-out at start
   const ringR = CFG.orb ? orbR * 0.66 / cam.s : cam.R * 1.14 + 26;  // the inbox ring (world units)
   rot += CFG.spin * dt * .000012;
 
-  const s = cam.s, ox = W * CFG.cx, oy = H * CFG.cy, cr = Math.cos(rot), sr = Math.sin(rot);
+  const s = cam.s, ox = W * CFG.cx, oy = H * CFG.cy;
+  const cr = CFG.sphere ? 1 : Math.cos(rot), sr = CFG.sphere ? 0 : Math.sin(rot);   // sphere: the turn is in 3D
   view = { s, ox, oy, cr, sr };
   const toS = (x, y) => [ox + (x * cr - y * sr) * s, oy + (x * sr + y * cr) * s];
+  // sphere: each neuron is projected once (turn about the vertical axis, a fixed tilt, a little perspective) and the
+  // 2D drawing below draws the projection; its own place is put back at the end of the frame (`kept`)
+  let kept = null, project = null, scanY = null;
+  if (CFG.sphere) {
+    const ry = CFG.rot !== null ? CFG.rot : rot * 4, cy = Math.cos(ry), sy = Math.sin(ry);
+    const ct = Math.cos(SPH.TILT), st = Math.sin(SPH.TILT), P = SPH.PERSP * SPH.R;
+    kept = new Float64Array(sim.length * 3);
+    // the scan band: a latitude going down the sphere and back, only while she works on the memory
+    const scanning = CFG.fx.has('scan') && (CFG.scan || stats.state === 'consolidating' || stats.state === 'researching');
+    scanY = scanning ? -SPH.R * Math.cos((now + CFG.tshift) / 3200) : null;
+    sim.forEach((n, i) => {
+      // lit by the band in the network's own color (not flash: that is green, means real activity and lights the lines)
+      n.sg = Math.max((n.sg || 0) * .93, scanY !== null ? Math.max(0, 1 - Math.abs(n.y - scanY) / 14) : 0);
+      const x1 = n.x * cy + n.z * sy, z1 = -n.x * sy + n.z * cy;
+      const y1 = n.y * ct - z1 * st, z2 = n.y * st + z1 * ct, k = P / (P + z2);
+      kept[i * 3] = n.x; kept[i * 3 + 1] = n.y; kept[i * 3 + 2] = n.r;
+      n.pz = z2 / SPH.R;                               // -1 nearest .. 1 farthest
+      n.x = n.fx = x1 * k; n.y = n.fy = y1 * k; n.r *= k * k;   // near ones bigger: depth reads at a glance
+    });
+    project = (x, y, z) => {
+      const x1 = x * cy + z * sy, z1 = -x * sy + z * cy, y1 = y * ct - z1 * st, z2 = y * st + z1 * ct, k = P / (P + z2);
+      return [x1 * k, y1 * k, z2 / SPH.R];
+    };
+  }
+  const LAYERS = 5, layer = n => Math.max(0, Math.min(LAYERS - 1, Math.floor((n.pz + 1) / 2 * LAYERS)));   // sphere: near .. far
+  const LAYER_A = [1, .74, .5, .3, .16];
 
   // inbox ring
   const step = Math.min(.05, 6.2832 / Math.max(inbox.length, 1));
-  inbox.forEach((n, i) => { const a = -1.5708 - rot * 2 + i * step; n.x = Math.cos(a) * ringR; n.y = Math.sin(a) * ringR; });
+  let orbitPath = null;
+  if (CFG.sphere && CFG.fx.has('orbit')) {   // a tilted orbit round the sphere; each new fact a satellite on it
+    const RO = SPH.R * 1.1, inc = 1.05, at = (a) => project(RO * Math.cos(a), RO * Math.sin(a) * Math.sin(inc), RO * Math.sin(a) * Math.cos(inc));
+    const gap = Math.min(.35, 6.2832 / Math.max(inbox.length, 1));
+    inbox.forEach((n, i) => { const [x, y, z] = at((now + CFG.tshift) / 9000 + i * gap); n.x = x; n.y = y; n.pz = z; });
+    if (inbox.length) { orbitPath = []; for (let i = 0; i <= 96; i++) orbitPath.push(at(i / 96 * 6.2832)); }
+  } else inbox.forEach((n, i) => { const a = -1.5708 - rot * 2 + i * step; n.x = Math.cos(a) * ringR; n.y = Math.sin(a) * ringR; });
 
   // cluster radius (for label placement)
   for (const n of sim) if (n.type === 'category') { n.ext = 0; n.cnt = 0; }
@@ -541,14 +705,58 @@ function frame(now) {
   if (CFG.orb) { ctx.beginPath(); ctx.arc(ox, oy, orbR * .985, 0, 6.2832); ctx.clip(); }
   ctx.setTransform(DPR * s * cr, DPR * s * sr, -DPR * s * sr, DPR * s * cr, DPR * ox, DPR * oy);
   const px = 1 / s;
+  if (CFG.sphere) {   // the shell's outline and a faint equator, so it reads as a sphere and not a disc
+    const P = SPH.PERSP * SPH.R, limb = SPH.R * P / Math.sqrt(P * P - SPH.R * SPH.R);
+    // a volume: lit from the upper left, darker towards the far edge
+    const vol = ctx.createRadialGradient(-limb * .35, -limb * .4, limb * .05, 0, 0, limb);
+    vol.addColorStop(0, rgba(PAL.rel, .075)); vol.addColorStop(.7, rgba(PAL.rel, .025)); vol.addColorStop(1, rgba(PAL.rel, .0));
+    ctx.fillStyle = vol; ctx.beginPath(); ctx.arc(0, 0, limb, 0, 6.2832); ctx.fill();
+    // no outline: the owner didn't want a circle drawn round the conversations (2026-11-21)
+    // the globe's grid turns with the network: latitudes and meridians, the far half fainter
+    const R = SPH.R * 1.01, seg = 48, lines = [];
+    for (const lat of [-60, -30, 0, 30, 60]) {
+      const f = lat * Math.PI / 180, y = R * Math.sin(f), r = R * Math.cos(f), pts = [];
+      for (let i = 0; i <= seg; i++) { const a = i / seg * 6.2832; pts.push(project(r * Math.cos(a), y, r * Math.sin(a))); }
+      lines.push(pts);
+    }
+    for (let m = 0; m < 12; m++) {
+      const a = m / 12 * 6.2832, pts = [];
+      for (let i = 0; i <= seg / 2; i++) { const f = -1.5708 + i / (seg / 2) * 3.1416; pts.push(project(R * Math.cos(f) * Math.cos(a), R * Math.sin(f), R * Math.cos(f) * Math.sin(a))); }
+      lines.push(pts);
+    }
+    ctx.lineWidth = .7 * px;
+    for (const [far, al] of [[true, .05], [false, .17]]) {
+      ctx.beginPath();
+      for (const pts of lines) for (let i = 1; i < pts.length; i++) {
+        if ((pts[i][2] + pts[i - 1][2] > 0) !== far) continue;
+        ctx.moveTo(pts[i - 1][0], pts[i - 1][1]); ctx.lineTo(pts[i][0], pts[i][1]);
+      }
+      ctx.strokeStyle = rgba(PAL.rel, al); ctx.stroke();
+    }
+  }
 
   ctx.lineWidth = .7 * px;
+  if (CFG.sphere) {   // far lines fainter than near ones; a conversation's line to Memories fainter than the rest
+    for (let L = LAYERS - 1; L >= 0; L--) {
+      for (const [kind, shellLine, c, a0] of [['tree', false, PAL.tree, .3], ['tree', true, PAL.tree, .08],
+                                               ['rel', false, PAL.rel, .14]]) {
+        ctx.beginPath();
+        for (const e of edges) {
+          if (e.k !== kind || (kind === 'tree' && !!(e.a.shell || e.b.shell) !== shellLine)) continue;
+          if (layer({ pz: (e.a.pz + e.b.pz) / 2 }) !== L) continue;
+          ctx.moveTo(e.a.x, e.a.y); ctx.lineTo(e.b.x, e.b.y);
+        }
+        ctx.strokeStyle = rgba(c, a0 * LAYER_A[L]); ctx.stroke();
+      }
+    }
+  } else {
   ctx.beginPath();
   for (const e of edges) if (e.k === 'tree') { ctx.moveTo(e.a.x, e.a.y); ctx.lineTo(e.b.x, e.b.y); }
   ctx.strokeStyle = CFG.orb ? 'rgba(120,170,185,.24)' : 'rgba(120,170,185,.14)'; ctx.stroke();
   ctx.beginPath();
   for (const e of edges) if (e.k === 'rel') { ctx.moveTo(e.a.x, e.a.y); ctx.lineTo(e.b.x, e.b.y); }
   ctx.strokeStyle = CFG.orb ? 'rgba(41,198,230,.07)' : 'rgba(41,198,230,.022)'; ctx.stroke();
+  }
   for (const e of edges) if (e.k === 'bond') {
     if (CFG.orb && memNode) {   // the neural bond: Self's amber into Memories, Memories' cyan into User
       ctx.lineWidth = 1.6 * px;
@@ -581,19 +789,69 @@ function frame(now) {
 
   // cold neurons (batched)
   const rMin = (CFG.orb ? 2.2 : .9) * px;
-  for (const br of ['user', 'self']) {
+  for (const br of ['user', 'self']) for (let L = CFG.sphere ? LAYERS - 1 : 0; L >= 0; L--) {   // sphere: far ones first, fainter
     ctx.beginPath();
     for (const n of sim) {
       if (n.branch !== br || n.hub || n.heat >= .04 || n.read >= .04) continue;
-      const r = Math.max(n.r, rMin);
+      if (CFG.sphere && layer(n) !== L) continue;
+      if (CFG.sphere && CFG.fx.has('bokeh') && L >= 3) continue;   // drawn as soft blurs below
+      const r = Math.max(n.r, rMin * (CFG.sphere ? .8 : 1));
       ctx.moveTo(n.x + r, n.y); ctx.arc(n.x, n.y, r, 0, 6.2832);
     }
-    ctx.fillStyle = br === 'user' ? 'rgba(170,200,210,.62)' : 'rgba(242,184,75,.6)';
+    const a = CFG.sphere ? LAYER_A[L] : 1;
+    ctx.fillStyle = br === 'user' ? rgba(PAL.cold, .62 * a) : `rgba(242,184,75,${.6 * a})`;
     ctx.fill();
+  }
+  if (CFG.sphere && CFG.fx.has('bokeh')) {   // the far ones out of focus: a soft blur instead of a sharp dot
+    ctx.globalCompositeOperation = 'lighter';
+    for (const n of sim) {
+      if (n.hub || n.heat >= .04 || n.read >= .04 || layer(n) < 3) continue;
+      const sz = Math.max(n.r, rMin) * 7;
+      ctx.globalAlpha = layer(n) === 3 ? .32 : .2;
+      ctx.drawImage(n.branch === 'self' ? GLOW.self : GLOW.user, n.x - sz / 2, n.y - sz / 2, sz, sz);
+    }
+    ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+  }
+  if (CFG.sphere && CFG.fx.has('scan')) {   // what the band touched glows a moment in the network's color
+    ctx.globalCompositeOperation = 'lighter';
+    for (const n of sim) {
+      if (!(n.sg > .05)) continue;
+      const sz = Math.max(n.r, rMin) * 6 * (1 + n.sg * .6);
+      ctx.globalAlpha = .7 * n.sg * (.4 + .6 * LAYER_A[layer(n)]);
+      ctx.drawImage(GLOW.user, n.x - sz / 2, n.y - sz / 2, sz, sz);
+    }
+    ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+  }
+  if (scanY !== null) {   // the band itself: the latitude it is on, brighter in front
+    const r = Math.sqrt(Math.max(0, SPH.R * SPH.R - scanY * scanY)), pts = [];
+    for (let i = 0; i <= 72; i++) { const a = i / 72 * 6.2832; pts.push(project(r * Math.cos(a), scanY, r * Math.sin(a))); }
+    for (const [w, al] of [[6, .05], [2.5, .12], [1, .35]]) {
+      ctx.lineWidth = w * px;
+      ctx.beginPath();
+      for (let i = 1; i < pts.length; i++) if (pts[i][2] + pts[i - 1][2] < 0) { ctx.moveTo(pts[i - 1][0], pts[i - 1][1]); ctx.lineTo(pts[i][0], pts[i][1]); }
+      ctx.strokeStyle = rgba(PAL.rel, al); ctx.stroke();
+    }
+  }
+  if (orbitPath) {   // the orbit: faint behind the sphere, clearer in front
+    ctx.lineWidth = .8 * px;
+    for (const [front, al] of [[false, .12], [true, .42]]) {
+      ctx.beginPath();
+      for (let i = 1; i < orbitPath.length; i++) if ((orbitPath[i][2] + orbitPath[i - 1][2] < 0) === front) {
+        ctx.moveTo(orbitPath[i - 1][0], orbitPath[i - 1][1]); ctx.lineTo(orbitPath[i][0], orbitPath[i][1]);
+      }
+      ctx.strokeStyle = rgba(COL.self, al); ctx.stroke();
+    }
+    ctx.globalCompositeOperation = 'lighter';
+    for (const n of inbox) {
+      const sz = (n.pz < 0 ? 40 : 24) * px;
+      ctx.globalAlpha = n.pz < 0 ? 1 : .5;
+      ctx.drawImage(GLOW.self, n.x - sz / 2, n.y - sz / 2, sz, sz);
+    }
+    ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
   }
   // inbox
   ctx.beginPath();
-  for (const n of inbox) { ctx.moveTo(n.x + 1.6 * px, n.y); ctx.arc(n.x, n.y, 1.6 * px, 0, 6.2832); }
+  for (const n of inbox) { const r = (orbitPath ? (n.pz < 0 ? 3 : 1.8) : 1.6) * px; ctx.moveTo(n.x + r, n.y); ctx.arc(n.x, n.y, r, 0, 6.2832); }
   ctx.fillStyle = 'rgba(242,184,75,.85)'; ctx.fill();
 
   // parlamalar
@@ -602,7 +860,7 @@ function frame(now) {
     if (n.hub && !(n === selfRoot && n.deg <= 1)) {
       const g = n.branch === 'self' ? GLOW.self : GLOW.user;
       const sz = (n.r * 7 + 10 * px) * (1 + n.heat * .6);
-      ctx.globalAlpha = n.type === 'root' ? .9 : .55;
+      ctx.globalAlpha = (n.type === 'root' ? .9 : .55) * (CFG.sphere ? .3 + .7 * LAYER_A[layer(n)] : 1);
       ctx.drawImage(g, n.x - sz / 2, n.y - sz / 2, sz, sz);
     }
     // amber while she is reading it, then back to the green of a recently used memory
@@ -635,10 +893,10 @@ function frame(now) {
         ctx.beginPath(); ctx.arc(n.x, n.y, 5 * px + 2, 0, 6.2832); ctx.stroke();
         continue;
       }
-      ctx.fillStyle = n.branch === 'self' ? '#ffe3a8' : (n.type === 'root' ? '#effcff' : '#cdeef6');
+      ctx.fillStyle = n.branch === 'self' ? '#ffe3a8' : rgba(n.type === 'root' ? PAL.rootCore : PAL.core, CFG.sphere ? .35 + .65 * LAYER_A[layer(n)] : 1);
       ctx.beginPath(); ctx.arc(n.x, n.y, Math.max(n.r * .75, 1.4 * px), 0, 6.2832); ctx.fill();
       if (n.type === 'root') {
-        ctx.strokeStyle = 'rgba(41,198,230,.6)'; ctx.lineWidth = 1 * px;
+        ctx.strokeStyle = rgba(PAL.rel, .6); ctx.lineWidth = 1 * px;
         ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 5 * px, 0, 6.2832); ctx.stroke();
       }
     } else if (n.heat >= .04 || n.read >= .04) {
@@ -701,7 +959,8 @@ function frame(now) {
     taken.push(b);
     return true;
   };
-  const labelled = sim.filter(n => n.type === 'root' || n.type === 'category')
+  // sphere: no label for the far half (it would take the free places and read through the network)
+  const labelled = sim.filter(n => n.type === 'root' || (n.type === 'category' && !(CFG.sphere && n.pz > .2)))
     .sort((a, b) => (b.type === 'root') - (a.type === 'root') || b.deg - a.deg);
   for (const n of labelled) {
     const [x, y] = toS(n.x, n.y);
@@ -709,7 +968,7 @@ function frame(now) {
       const dormant = n === selfRoot && n.deg <= 1;
       if (HAS_LS) ctx.letterSpacing = '6px';
       ctx.font = '600 15px Rajdhani, sans-serif';
-      ctx.fillStyle = n.branch === 'self' ? rgba(COL.self, dormant ? .6 : .95) : 'rgba(120,220,245,.95)';
+      ctx.fillStyle = n.branch === 'self' ? rgba(COL.self, dormant ? .6 : .95) : rgba(PAL.label, .95);
       if (!free(x + 3, y - 20, ctx.measureText(n.label.toUpperCase()).width)) continue;
       ctx.fillText(n.label.toUpperCase(), x + 3, y - 20);
       if (dormant) {
@@ -720,7 +979,7 @@ function frame(now) {
     } else {
       if (HAS_LS) ctx.letterSpacing = '2.5px';
       ctx.font = '600 10.5px Rajdhani, sans-serif';
-      ctx.fillStyle = n.branch === 'self' ? 'rgba(242,184,75,.75)' : 'rgba(150,205,220,.72)';
+      ctx.fillStyle = n.branch === 'self' ? 'rgba(242,184,75,.75)' : rgba(PAL.cat, CFG.sphere ? .72 * (.45 + .55 * LAYER_A[layer(n)]) : .72);
       // push label outside the cluster, away from centre
       const vx = x - ox, vy = y - oy, vl = Math.hypot(vx, vy) || 1;
       const off = Math.min((n.ext || 0) * s, CFG.orb ? 40 : 160) + 14;
@@ -747,8 +1006,26 @@ function frame(now) {
     ctx.fillText(c.n.label, x + 38, y - 17);
   }
   if (HAS_LS) ctx.letterSpacing = '0px';
+  if (kept) sim.forEach((n, i) => { n.x = kept[i * 3]; n.y = kept[i * 3 + 1]; n.r = kept[i * 3 + 2]; });
 }
 requestAnimationFrame(frame);
+
+// bench=1: ms per frame, the first 60 (the layout may still move) and the last 200 (settled), in document.title
+function runBench() {
+  paused = true;
+  const times = [];
+  let t = performance.now();
+  for (let i = 0; i < 300; i++) {
+    t += 40; lastF = t - 40;
+    const a = performance.now(); paused = false; frame(t); paused = true; times.push(performance.now() - a);
+  }
+  const avg = xs => (xs.reduce((p, q) => p + q, 0) / xs.length).toFixed(2);
+  const keep = alpha, t0 = performance.now();
+  for (let i = 0; i < 50; i++) (CFG.sphere ? tick3 : tick)();   // one physics step, as when something new arrives
+  const tickMs = ((performance.now() - t0) / 50).toFixed(2);
+  alpha = keep;
+  document.title = `BENCH first60=${avg(times.slice(0, 60))} settled=${avg(times.slice(100))} tick=${tickMs} nodes=${sim.length} alpha=${alpha.toFixed(4)}`;
+}
 
 /* ---------- tooltip (mouse) ---------- */
 const tip = document.getElementById('tip');
@@ -759,7 +1036,10 @@ addEventListener('mousemove', ev => {
   const x0 = (ev.clientX - ox) / s, y0 = (ev.clientY - oy) / s;
   const wx = x0 * cr + y0 * sr, wy = -x0 * sr + y0 * cr;
   let best = null, bd = (10 / s) ** 2;
-  for (const n of sim.concat(inbox)) { const d = (n.x - wx) ** 2 + (n.y - wy) ** 2; if (d < bd) { bd = d; best = n; } }
+  for (const n of sim.concat(inbox)) {
+    const nx = CFG.sphere && n.status !== 'inbox' ? n.fx : n.x, ny = CFG.sphere && n.status !== 'inbox' ? n.fy : n.y;
+    const d = (nx - wx) ** 2 + (ny - wy) ** 2; if (d < bd) { bd = d; best = n; }
+  }
   if (!best) { tip.style.display = 'none'; return; }
   const path = pathOf(best).slice(0, -1).map(p => p.label.toUpperCase()).join(' › ');
   tip.innerHTML = '';
@@ -812,6 +1092,7 @@ async function load() {
     const j = await r.json();
     stats.live = true; stats.offline = false;
     merge(j);
+    if (CFG.bench && !bench.done) { bench.done = true; setTimeout(runBench, 300); }
   } catch (e) {
     if (firstLoad && !CFG.srcGiven) { startDemo(); return; }
     stats.offline = true;

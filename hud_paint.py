@@ -8,8 +8,10 @@ from PySide6.QtGui import QColor, QFont, QFontDatabase, QLinearGradient, QPainte
 
 import paths
 
-C = {"cyan": "#38D6FF", "cyan2": "#7FDFFF", "text": "#E6F7FF", "muted": "#6E8A96", "dim": "#3E5560",
-     "soft": "#B8D4DE", "amber": "#FFB23E", "mint": "#3DF5A8", "hot": "#FF4FA3"}
+# The owner's colors of 2026-11-21: the HUD in the standby's light red family (no blue left). The keys keep their old
+# names ("cyan" was #38D6FF): every panel reads them by name.
+C = {"cyan": "#FF969D", "cyan2": "#FFC2C6", "text": "#FFF0F1", "muted": "#967B7E", "dim": "#5E4547",
+     "soft": "#E2C5C8", "amber": "#FFB23E", "mint": "#3DF5A8", "hot": "#FF4FA3"}
 
 
 def color(hex_, alpha=1.0):

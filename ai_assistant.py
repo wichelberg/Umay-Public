@@ -18,6 +18,7 @@ import i18n
 import paths
 import audio_devices
 import browser_tools
+import topic_research
 import calendar_tools
 import chat_box
 import coding_mode
@@ -314,7 +315,7 @@ def web_search(query: str) -> str:
     news = bool(NEWS_ASKED.search(query) or NEWS_ASKED.search(getattr(_memory, "owner_said", "")))
     filters = {"topic": "news", "time_range": "day"} if news else \
         ({"time_range": "month"} if RECENT_QUERY.search(query) else {})
-    try:   # news is headlines (the dates matter, not the pages); anything else also reads the first two pages
+    try:   # news is filtered to today's first, then its first two articles are read too (below)
         results = search_results(query, max_results=5, pages=0 if news else 2, **filters)
     except Exception as e:
         return i18n.get(_language, "web_search_failed", error=e)
@@ -323,7 +324,15 @@ def web_search(query: str) -> str:
         results = _todays(results)
         if not results:
             return "No news from the last 24 hours about that. Say so; don't use older news."
+        if search_mode() == "local":
+            # 2026-11-20: a headline is 150-190 characters; the 8B filled the rest in itself (Trump-Xi-Putin, 19 Nov).
+            # Read after the date filter, so only today's articles are fetched. Tavily's snippets are long already.
+            try:
+                results = local_search.enrich(results, pages=2)
+            except Exception:
+                pass
         return "\n".join(f"- {r.get('title', '')} ({r.get('url', '')}) [published {r['day']}]\n  {r.get('content', '')}"
+                         + (f"\n  Page text: {r['page']}" if r.get("page") else "")
                          for r in results)
     if not results:
         return i18n.get(_language, "web_search_no_results")
@@ -855,6 +864,8 @@ def _turn(chat, user_text):
     2026-11-07), and MEMORY_RULE where the message is about that. `tools`: None for all of them, [] for a message
     that only thanks or says goodbye (small_talk; not while a plan waits for an answer)."""
     known = memory_cortex.context_for(user_text) if MODES[chat["mode"]]["local"] else ""
+    if MODES[chat["mode"]]["local"]:  # what she researched earlier, with its dates (words only, a few ms)
+        known += topic_research.knowledge_for(user_text)
     said = memory_cortex.HINT.sub("", user_text or "").replace("’", "'")
     about_memory = MEMORY_ASKED.search(said) or OWNER_TELLS.search(said)
     timed = TIME_ASKED.search(said) or memory_cortex.DAY_DATE.search(known)
@@ -1051,9 +1062,17 @@ def _run_calls(messages, tool_calls, called, allowed=None):
         if fn_info["name"] in UNTRUSTED_TOOLS:
             pc_tools.mark_untrusted()
         memory_cortex.note_tool(fn_info["name"], result)  # a folder seen: its path goes on its neuron
+        if fn_info["name"] == "web_search":  # what the owner asks about is a topic: topic_research studies it while they are away
+            try:
+                topic_research.note_search(getattr(_memory, "owner_said", ""),
+                                           json.loads(fn_info.get("arguments") or "{}").get("query"), result)
+            except Exception:
+                pass
         if isinstance(result, dict) and ("image" in result or "images" in result):
             images += result.get("images") or [result["image"]]
             result = result["text"]
+        if not str(result).startswith("Not opened"):   # a refusal must not make the made-up address "seen"
+            browser_tools.note_addresses(str(result))  # a search hit or a tab list shows real addresses: they may be opened
         texts.append(str(result))
         messages.append({"role": "tool", "tool_call_id": tc["id"], "content": str(result)})
     hud.activity("think")
@@ -1117,7 +1136,7 @@ def _arguments(mode, tool, request, before, done, run):
     parts.append(f"The owner's message: {request}{getattr(_memory, 'note', '')}")
     if done:
         parts.append("Already done for it:\n" + "\n".join(
-            f"{n}. {name}({json.dumps(args, ensure_ascii=False)[:300]}) answered: {str(result)[:ARGS_RESULT_CHARS]}"
+            f"{n}. {name}({json.dumps(args, ensure_ascii=False)[:300]}) answered: {_trim_result(result, ARGS_RESULT_CHARS)}"
             for n, (name, args, result) in enumerate(done, 1)))
     parts.append(f"The tool to call now: {fn['name']}\nWhat it does: {fn.get('description', '')}\n"
                  f"Its parameters: {json.dumps(schema, ensure_ascii=False)}")
@@ -1161,9 +1180,65 @@ def _seen(images, request):
     return f"What the screenshot shows: {said.strip()}" if isinstance(said, str) and said.strip() else NOT_SEEN
 
 
-def _say(mode, messages, run, extra=""):
+# "Clicked the account row at (820, 547)" with no click call in the request (2026-11-19: only look_at_screen and
+# move_mouse ran, and the talker made the click up, so the owner heard it was done). `done` of _picked_loop is
+# (name, args, result): a click counts only when its answer says it clicked ("Not clicked", "Stopped" don't).
+_CLICK_DENIED = re.compile(r"(?:\b(?:not|never|no)\b|n['’]t\b)\s*(?:\w+\s+){0,2}click\w*", re.IGNORECASE)
+_CLICK_CLAIMED = re.compile(r"\b(?:double-)?clicked\b|\bt[ıi]klad[ıi]m\b", re.IGNORECASE)
+_CLICK_DONE = re.compile(r"(?:double-)?clicked\b", re.IGNORECASE)
+NOT_CLICKED = ("\n(In this request no click happened, so you have not clicked anything. Say plainly what you did "
+               "and what you did not do. Never say you clicked.)")
+NOT_CLICKED_ANSWER = "I haven't clicked anything yet, dear: no click went through in this request."
+
+
+def false_click(answer, done):
+    """The answer says it clicked, but no click call in `done` (name, args, result) did."""
+    if any(name == "click" and _CLICK_DONE.match(str(result).lstrip()) for name, _, result in done):
+        return False
+    return bool(_CLICK_CLAIMED.search(_CLICK_DENIED.sub("", answer or "")))
+
+
+# The same for every other thing a talker says it did (2026-11-20: "open some articles in Opera GX" ran web_search
+# alone and the answer said "I have opened those articles"; "yes" then repeated it with no tool at all). A claim of
+# `verb` is true only when a tool of that kind ran in this request or just before it (the history's tool calls:
+# "did you save it?" is answered from them). Past tense in the first person, or opening a sentence; "not/never/n't"
+# before it cancels it. Both lists are small on purpose: a missed claim costs what it did before, a false alarm
+# swaps a good answer for an apology.
+_CLAIMS = {
+    "open": (r"opened|launched", r"open|launch|start|navigate|youtube|spotify|steam|window_control|web_tabs|play|video|"
+                                 r"vscode|terminal|claude_code|browser"),
+    "close": (r"closed|shut", r"close|window_control|web_tabs|kill|stop|quit|shutdown"),
+    "send": (r"sent|emailed|messaged|texted|called", r"send|mail|whatsapp|telegram|message|call|draft|notify|share"),
+    "save": (r"saved|added|scheduled|created|noted|recorded|renamed|moved|copied",
+             r"add_|set_|create|write|save|remind|alarm|calendar|plan|schedule|note|memory|folder|move|copy|rename"),
+    "delete": (r"deleted|removed|cleared|cancel(?:l)?ed", r"delete|remove|clear|cancel"),
+}
+_CLAIM_AT = r"(?:\bI(?:'ve| have)?\s+(?:just\s+|now\s+|already\s+)?|\b(?:have|has)\s+been\s+|(?:^|[.!?]\s+|\n\s*))"
+_CLAIM_RES = {k: (re.compile(_CLAIM_AT + rf"(?:{w})\b", re.IGNORECASE | re.MULTILINE), re.compile(t, re.IGNORECASE),
+                  re.compile(rf"(?:\bnot\b|\bnever\b|\bno\b|n['’]t\b)\s*(?:\w+\s+){{0,2}}(?:{w})\b", re.IGNORECASE))
+              for k, (w, t) in _CLAIMS.items()}
+NOT_DONE_NOTE = ("\n(No tool that could do it ran in this request, so you have not opened, closed, sent, saved or "
+                 "deleted anything. Say plainly what you did and what you did not do. Never say you did.)")
+NOT_DONE_ANSWER = "I haven't done that yet, dear: nothing ran for it in this request."
+CLAIM_HISTORY = 14      # messages back whose tool calls make "I opened it" true
+
+
+def false_claim(answer, done, history=()):
+    """The kind ("open", "close", ...) of an action the answer says it did while no tool of that kind ran in `done`
+    (name, args, result) or in `history` (messages: their tool calls count), else None."""
+    names = [d[0] for d in done] + [tc["function"]["name"] for m in history if isinstance(m, dict)
+                                    for tc in (m.get("tool_calls") or [])]
+    for kind, (claimed, tool, denied) in _CLAIM_RES.items():
+        if claimed.search(denied.sub("", answer or "")) and not any(tool.search(n) for n in names):
+            return kind
+    return None
+
+
+def _say(mode, messages, run, extra="", done=None):
     """The model's answer to the conversation as it stands, with no tool to call; appended to `messages`.
-    `extra` goes after the owner's message for this request only."""
+    `extra` goes after the owner's message for this request only. `done`: the tools run in this request, to
+    refuse an answer that says it clicked, opened, closed, sent, saved or deleted when nothing did (it is asked
+    once more, then replaced)."""
     kept = getattr(_memory, "note", "")
     _memory.note = kept + extra
     try:
@@ -1178,6 +1253,14 @@ def _say(mode, messages, run, extra=""):
     # named YouTube links found.', 2026-11-11): the model copies the notes' form. Only what stands before it is kept.
     content = ASIDE.sub("", (content or "").split(RESULT_OPEN.split("{")[0])[0].rstrip() or content or "")
     content = _without_offer(content)
+    if done is not None and false_click(content, done):
+        if not extra.endswith(NOT_CLICKED):
+            return _say(mode, messages, run, extra + NOT_CLICKED, done)
+        content = NOT_CLICKED_ANSWER
+    elif done is not None and false_claim(content, done, messages[-CLAIM_HISTORY:]):
+        if not extra.endswith(NOT_DONE_NOTE):
+            return _say(mode, messages, run, extra + NOT_DONE_NOTE, done)
+        content = NOT_DONE_ANSWER
     messages.append({"role": "assistant", "content": content})
     return content
 
@@ -1216,7 +1299,7 @@ def _picked_loop(mode, messages, rounds, called, run, tools=None):
                             seconds=round(chose - began, 2), args_seconds=round(time.monotonic() - chose, 2),
                             **({"error": error} if error else {}), **({"repeat": True} if repeat else {}))
         if args is None or repeat:
-            return _say(mode, messages, run, TOOLS_DOWN if error and not done else "")
+            return _say(mode, messages, run, TOOLS_DOWN if error and not done else "", done)
         call = {"id": f"call_{uuid.uuid4().hex[:12]}", "type": "function",
                 "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}}
         messages.append({"role": "assistant", "content": "", "tool_calls": [call]})
@@ -1256,6 +1339,18 @@ def _show(source, text):
         pc_tools.current_notifier()("plan_note", text=text)
 
 
+TAB_LINE = re.compile(r"^(\[\d+\] [^\n]*?) — (https?://[^/\s]+)\S*$", re.MULTILINE)
+
+
+def _trim_result(text, limit):
+    """A tool's answer cut to `limit` characters, except a tab list: its lines shrink to "[id] title — host" and it gets twice the
+    room, so the tab meant is in it (2026-11-19: the check saw "8 of the 20 tabs" and failed a step on a list it never saw whole)."""
+    text = str(text)
+    if " tabs open in Opera GX" in text[:60]:
+        return TAB_LINE.sub(r"\1 — \2", text)[:limit * 2]
+    return text[:limit]
+
+
 def _what_was_done(messages):
     """The tools a step called and the start of what they answered, for the heavy model's fix and check. That
     model is in the cloud, so what search_memory found stays here (the owner's rule, 2026-11-08)."""
@@ -1267,7 +1362,7 @@ def _what_was_done(messages):
             private |= {tc["id"] for tc in m["tool_calls"] if tc["function"]["name"] == "search_memory"}
         elif m["role"] == "tool":
             shown = "(found in the memory, not shown)" if m.get("tool_call_id") in private else str(m.get("content"))
-            lines.append(f"  -> {shown[:RESULT_SHOWN]}")
+            lines.append(f"  -> {_trim_result(shown, RESULT_SHOWN)}")
     return "\n".join(lines[-16:])
 
 
@@ -1358,8 +1453,14 @@ def _run_plan(request, steps, called, run):
                 request, steps, i, results, f"{problem}\n{_what_was_done(messages)}".strip(), TOOLS)
             if new is None:
                 task_plan.note("stopped", number=i + 1, why=gave_up or problem)
+                if task_plan.spoken(request):
+                    # read aloud: a plain clause and what was got so far, never the checker's reasoning (tool names,
+                    # "It worked if"), which was spoken on 2026-11-20
+                    so_far = task_plan.brief(re.sub(r" \(not checked\)$", "", results[-1])) if results else ""
+                    return i18n.get(_language, "plan_stopped_short", step=i + 1, count=len(steps),
+                                    so_far=i18n.get(_language, "plan_so_far", text=so_far) if so_far else "")
                 return i18n.get(_language, "plan_stopped", step=i + 1, count=len(steps),
-                                why=gave_up or problem or i18n.get(_language, "plan_no_answer"),
+                                why=task_plan.brief(gave_up or problem, 300) or i18n.get(_language, "plan_no_answer"),
                                 done=task_plan.results_text(results))
             retried.add(i)
             steps = steps[:i] + [new] + steps[i + 1:]

@@ -60,9 +60,13 @@ DOUBT = 0.35
 # Asked before every choice after the first. 14 hand-written states, 2026-11-11: 0.93-1.00 for the 8 finished ones
 # (0.63 for a tool that failed for good), 0.11-0.30 for the 6 with a step left ("Close the music app." after
 # list_open_apps).
+# 2026-11-20: "open some articles in Opera GX" after a web_search was judged done (0.71): nothing was opened and the
+# talker said it was. Measured on the real d3 (18 states, the real turn included): this wording 17/18, the one before 15/18.
 ASK_DONE = ("The state is a message a user sent to their desktop assistant and what the assistant already did for "
             "it. Is everything the message asks for now done or answered (yes), or is another action still needed "
-            "(no)?")
+            "(no)? A search, a list or a lookup only finds things: it never opens, plays, clicks, closes, sends or "
+            "saves anything. When the message asks for one of those, it is not done (no) until a tool that really "
+            "does it (an open, play, close, send or save tool) has run and its answer says it worked.")
 ASK_NEXT = ("The state is a message the user sent to Umay, their desktop assistant, and what Umay has already done "
             "for it. Choose the one tool Umay should call next to finish what the message asks, or none when it is "
             "done or the answers already hold what the user asked for.")

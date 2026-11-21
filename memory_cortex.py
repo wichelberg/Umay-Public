@@ -184,6 +184,9 @@ CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
 CREATE TABLE IF NOT EXISTS logs(name TEXT PRIMARY KEY, size INTEGER, done INTEGER);
 CREATE TABLE IF NOT EXISTS research(node TEXT, at INTEGER);
 CREATE TABLE IF NOT EXISTS bin(node TEXT PRIMARY KEY, at INTEGER, why TEXT);
+-- what the owner asked Umay to look up (topic_research): studied while they are away, then looked at again
+CREATE TABLE IF NOT EXISTS topics(id TEXT PRIMARY KEY, topic TEXT NOT NULL, first_asked INTEGER, last_asked INTEGER,
+  asks INTEGER DEFAULT 1, last_studied INTEGER, studied INTEGER DEFAULT 0, urls TEXT, holder TEXT, status TEXT DEFAULT 'open');
 """
 
 OWNER_SPEAKS = re.compile(r"^(?!Umay:|—:)[^:\n]{1,40}:\s*\S")
@@ -1565,6 +1568,8 @@ class Learner:
                 return
             self.file(n["id"])
         away = self.away()
+        import topic_research  # imports this module: here, not at the top
+        topic_research.pause_if_back(away)  # a quiet research job gives the PC back when the owner returns
         passing = away and self.full_pass()
         for path in self.to_learn(passing)[:PER_CHECK]:
             if not can_run():
@@ -1580,6 +1585,8 @@ class Learner:
             self.lookup_entities()  # what the people / channels the owner watched are, then clusters
         if can_run() and away:
             self.research()
+        if can_run() and away:
+            topic_research.study_next(away, now=self.now(), store=self.store)  # what the owner asked about, studied properly
         if can_run() and away and not passing:
             self.tidy()
         return passing
@@ -2485,7 +2492,8 @@ def search_text(query, limit=8):
         return ""
     try:
         s = store()
-        keep = lambda r: r["type"] in ("fact", "entity", "episode") and r["branch"] == "user"
+        studied = {n["id"] for n in s.children("s:knowledge")}  # what topic_research learnt: SELF > Knowledge > topic
+        keep = lambda r: r["type"] in ("fact", "entity", "episode") and (r["branch"] == "user" or r["parent"] in studied)
         vec = embed_one(QUERY_INSTRUCT + query, timeout=6)
         hits = [h for h in s.nearest(vec, limit, keep=keep) if h[0] >= MIN_SIMILARITY - 0.05] \
             if vec is not None else s.keyword_nearest(query, limit, keep=keep)
